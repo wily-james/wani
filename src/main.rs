@@ -317,6 +317,11 @@ async fn command_review(args: &Args) {
     }
 
     async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig) -> Result<(), WaniError> {
+        enum AnswerColor {
+            Green,
+            Red,
+            Gray
+        }
         let term = Term::buffered_stdout();
         let rng = &mut thread_rng();
         let width = 80;
@@ -329,6 +334,7 @@ async fn command_review(args: &Args) {
         let magenta_tag = format!("\x1b[{}m", 5 + 40);
         let cyan_tag = format!("\x1b[{}m", 6 + 40);
         let green_tag = format!("\x1b[{}m", 2 + 40);
+        let gray_tag = format!("\x1b[48;5;{}m", 145);
         let wfmt_args;
         if term.features().colors_supported() {
             wfmt_args = wanidata::WaniFmtArgs {
@@ -479,11 +485,11 @@ async fn command_review(args: &Args) {
                 let guess = vis_input.trim().to_lowercase();
                 let answer_result = wanidata::is_correct_answer(subject, &guess, is_meaning, &kana_input);
 
-                // Tuple (retry, toast, correct)
+                // Tuple (retry, toast, answer_color)
                 let tuple = match answer_result {
                     wanidata::AnswerResult::FuzzyCorrect => todo!(),
-                    wanidata::AnswerResult::BadFormatting => (true, Some("Try again!"), false),
-                    wanidata::AnswerResult::KanaWhenMeaning => (true, Some("We want the reading, not the meaning."), false),
+                    wanidata::AnswerResult::BadFormatting => (true, Some("Try again!"), AnswerColor::Gray),
+                    wanidata::AnswerResult::KanaWhenMeaning => (true, Some("We want the reading, not the meaning."), AnswerColor::Gray),
                     wanidata::AnswerResult::Correct => {
                         review.status = match subject {
                             Subject::Radical(_) | Subject::KanaVocab(_) => 
@@ -516,7 +522,7 @@ async fn command_review(args: &Args) {
                                 }
                             },
                         };
-                        (false, correct_msg, true)
+                        (false, correct_msg, AnswerColor::Green)
                     },
                     wanidata::AnswerResult::Incorrect => {
                         failed += 1;
@@ -526,9 +532,9 @@ async fn command_review(args: &Args) {
                         else {
                             review.incorrect_reading_answers += 1;
                         }
-                        (false, incorrect_msg, false)
+                        (false, incorrect_msg, AnswerColor::Red)
                     },
-                    wanidata::AnswerResult::MatchesNonAcceptedAnswer => (true, Some("Answer not accepted. Try again"), false),
+                    wanidata::AnswerResult::MatchesNonAcceptedAnswer => (true, Some("Answer not accepted. Try again"), AnswerColor::Gray),
                 };
                 toast = tuple.1;
 
@@ -537,13 +543,18 @@ async fn command_review(args: &Args) {
                 }
 
                 let input_line = pad_str(&vis_input, width, align, None);
-                let input_formatted;
-                if tuple.2 {
-                    input_formatted = style(input_line.deref()).white().on_green().to_string();
-                }
-                else {
-                    input_formatted = style(input_line.deref()).white().on_red().to_string();
-                }
+                let input_formatted = match tuple.2 {
+                    AnswerColor::Red => {
+                        style(input_line.deref()).white().on_red().to_string()
+                    },
+                    AnswerColor::Green => {
+                        style(input_line.deref()).white().on_green().to_string()
+                    },
+                    AnswerColor::Gray => {
+                        style(input_line.deref()).white().on_color256(238).to_string()
+                    },
+                };
+
                 print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
                 let input_width = console::measure_text_width(&vis_input);
                 term.move_cursor_to(width / 2 + input_width / 2, 3)?;
