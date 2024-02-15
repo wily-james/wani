@@ -1,16 +1,16 @@
 mod wanidata;
+mod wanisql;
 
-use crate::wanidata::{
-    AuxMeaning, WaniData, WaniResp
-};
+use crate::wanidata::WaniData;
+use crate::wanidata::WaniResp;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use clap::{Parser, Subcommand};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use reqwest::{
     blocking::Client, StatusCode
 };
 use rusqlite::{
-    Connection, Error as SqlError, Statement
+    Connection, Error as SqlError
 };
 use thiserror::Error;
 
@@ -113,23 +113,8 @@ fn command_query_radicals(args: &Args) {
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
-            let mut stmt = c.prepare("select 
-                                     id,
-                                      aux_meanings,
-                                      created_at,
-                                      document_url,
-                                      hidden_at,
-                                      lesson_position,
-                                      level,
-                                      meaning_mnemonic,
-                                      meanings,
-                                      slug,
-                                      srs_id,
-                                      amalgamation_subject_ids,
-                                      characters,
-                                      character_images from radicals;").unwrap();
-
-            match stmt.query_map([], |r| parse_radical(r)
+            let mut stmt = c.prepare(wanisql::SELECT_ALL_RADICALS).unwrap();
+            match stmt.query_map([], |r| wanisql::parse_radical(r)
                                  .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
                 Ok(radicals) => {
                     for r in radicals {
@@ -256,32 +241,23 @@ fn command_sync(args: &Args, ignore_cache: bool) {
                             }
                         }
 
-                        let radicals_str = "replace into radicals
-                            (id,
-                             aux_meanings,
-                             created_at,
-                             document_url,
-                             hidden_at,
-                             lesson_position,
-                             level,
-                             meaning_mnemonic,
-                             meanings,
-                             slug,
-                             srs_id,
-                             amalgamation_subject_ids,
-                             characters,
-                             character_images)
-                            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
-
-                        let mut stmt = conn.prepare(radicals_str).unwrap();
+                        let stmt_res = conn.prepare(wanisql::INSERT_RADICALS);
                         let rad_len = radicals.len();
-                        for r in radicals {
-                            match store_radical(r, &mut stmt) {
-                                Err(_) => {
-                                    println!("Error inserting into radicals.\n{}", radicals_str);
-                                    parse_fails += 1;
+                        match stmt_res {
+                            Ok(mut stmt) => {
+                                for r in radicals {
+                                    match wanisql::store_radical(r, &mut stmt) {
+                                        Err(e) => {
+                                            println!("Error inserting into radicals.\n{}", e);
+                                            parse_fails += 1;
+                                        }
+                                        Ok(_) => {},
+                                    }
                                 }
-                                Ok(_) => {},
+                            },
+                            Err(e) => {
+                                println!("Error preparing insert into radicals statement. Error: {}", e);
+                                parse_fails += rad_len;
                             }
                         }
 
@@ -349,145 +325,15 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
 
     c.execute("replace into cache_info (id) values (0)", [])?;
 
-    // Radicals
-    c.execute(
-        "create table if not exists radicals (
-            id integer primary key,
-            aux_meanings text not null,
-            created_at text not null, 
-            document_url text not null,
-            hidden_at text,
-            lesson_position integer not null,
-            level integer not null,
-            meaning_mnemonic text not null,
-            meanings text not null,
-            slug text not null,
-            srs_id integer not null,
-            amalgamation_subject_ids text not null,
-            characters text,
-            character_images text not null
-        )", [])?;
-    
-    // Kanji
-    c.execute(
-        "create table if not exists kanji (
-            id integer primary key,
-            aux_meanings text not null,
-            created_at text not null, 
-            document_url text not null,
-            hidden_at text,
-            lesson_position integer not null,
-            level integer not null,
-            meaning_mnemonic text not null,
-            meanings text not null,
-            slug text not null,
-            srs_id integer not null,
-            characters text not null,
-            amalgamation_subject_ids text not null,
-            component_subject_ids text not null,
-            meaning_hint text,
-            reading_hint text,
-            reading_mnemonic text not null,
-            readings text not null,
-            visually_similar_subject_ids text
-        )", [])?;
-    
-    // Vocab
-    c.execute(
-        "create table if not exists vocab (
-            id integer primary key,
-            aux_meanings text not null,
-            created_at text not null, 
-            document_url text not null,
-            hidden_at text,
-            lesson_position integer not null,
-            level integer not null,
-            meaning_mnemonic text not null,
-            meanings text not null,
-            slug text not null,
-            srs_id integer not null,
-            characters text not null,
-            component_subject_ids text not null,
-            context_sentences text not null,
-            parts_of_speech text not null,
-            pronunciation_audios text not null,
-            readings text not null,
-            reading_mnemonic text not null
-        )", [])?;
-    
-    // KanaVocab
-    c.execute(
-        "create table if not exists kana_vocab (
-            id integer primary key,
-            aux_meanings text not null,
-            created_at text not null, 
-            document_url text not null,
-            hidden_at text,
-            lesson_position integer not null,
-            level integer not null,
-            meaning_mnemonic text not null,
-            meanings text not null,
-            slug text not null,
-            srs_id integer not null,
-            characters text not null,
-            context_sentences text not null,
-            parts_of_speech text not null,
-            pronunciation_audios text not null
-        )", [])?;
+    c.execute(wanisql::CREATE_RADICALS_TBL, [])?;
+    c.execute(wanisql::CREATE_KANJI_TBL, [])?;
+    c.execute(wanisql::CREATE_VOCAB_TBL, [])?;
+    c.execute(wanisql::CREATE_KANA_VOCAB_TBL, [])?;
 
     match c.close() {
         Ok(_) => Ok(()),
         Err(e) => Err(e.1),
     }
-}
-
-fn store_radical(r: wanidata::Radical, stmt: &mut Statement<'_>) -> Result<usize, SqlError>
-{
-    let p = rusqlite::params!(
-        format!("{}", r.id),
-        serde_json::to_string(&r.data.aux_meanings).unwrap(),
-        r.data.created_at.to_rfc3339(),
-        r.data.document_url,
-        if let Some(hidden_at) = r.data.hidden_at { Some(hidden_at.to_rfc3339()) } else { None },
-        format!("{}", r.data.lesson_position),
-        format!("{}", r.data.level),
-        r.data.meaning_mnemonic,
-        serde_json::to_string(&r.data.meanings).unwrap(),
-        r.data.slug,
-        format!("{}", r.data.spaced_repetition_system_id),
-        serde_json::to_string(&r.data.amalgamation_subject_ids).unwrap(),
-        if let Some(chars) = r.data.characters { Some(chars) } else { None },
-        serde_json::to_string(&r.data.character_images).unwrap(),
-        );
-    return stmt.execute(p);
-}
-
-fn parse_radical(r: &rusqlite::Row<'_>) -> Result<wanidata::Radical, WaniError> {
-    return Ok(wanidata::Radical {
-        id: r.get::<usize, i32>(0)?,
-        data: wanidata::RadicalData { 
-            aux_meanings: serde_json::from_str::<Vec<AuxMeaning>>(&r.get::<usize, String>(1)?)?,
-            created_at: DateTime::parse_from_rfc3339(&r.get::<usize, String>(2)?)?.with_timezone(&Utc),
-            document_url: r.get::<usize, String>(3)?, 
-            hidden_at: 
-                if let Some(t) = r.get::<usize, Option<String>>(4)? { 
-                    println!("Hidden at: {}", t);
-                    Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
-                } 
-                else { 
-                    None 
-                },
-                lesson_position: r.get::<usize, i32>(5)?, 
-                level: r.get::<usize, i32>(6)?, 
-                meaning_mnemonic: r.get::<usize, String>(7)?, 
-                meanings: serde_json::from_str::<Vec<wanidata::Meaning>>(&r.get::<usize, String>(8)?)?, 
-                slug: r.get::<usize, String>(9)?, 
-                spaced_repetition_system_id: r.get::<usize, i32>(10)?, 
-                amalgamation_subject_ids: serde_json::from_str::<Vec<i32>>(&r.get::<usize, String>(11)?)?, 
-                characters: r.get::<usize, Option<String>>(12)?, 
-                character_images: serde_json::from_str::<Vec<wanidata::RadicalImage>>(&r.get::<usize, String>(13)?)?, 
-        }
-    });
 }
 
 fn command_test_subject(args: &Args) {
