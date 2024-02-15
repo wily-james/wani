@@ -194,7 +194,6 @@ pub struct RadicalImage
     pub url: String
 }
 
-
 #[derive(Deserialize, Debug)]
 pub struct Kanji {
     // Resource Common
@@ -235,6 +234,12 @@ pub struct KanjiReading {
     pub primary: bool,
     pub accepted_answer: bool,
     pub r#type: KanjiType,
+}
+
+impl Answer for KanjiReading {
+    fn answer<'a>(&'a self) -> (&'a str, bool) {
+        (&self.reading, self.accepted_answer)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -313,6 +318,12 @@ pub struct VocabReading {
     pub reading: String,
 }
 
+impl Answer for VocabReading {
+    fn answer<'a>(&'a self) -> (&'a str, bool) {
+        (&self.reading, self.accepted_answer)
+    }
+}
+
 #[derive(Deserialize, Debug)]
 pub struct KanaVocab {
     // Resource Common
@@ -366,11 +377,22 @@ pub struct Lesson {
     pub subject_ids: Vec<i32>
 }
 
+trait Answer {
+    /// returns: (answer_text, is_accepted_answer)
+    fn answer<'a>(&'a self) -> (&'a str, bool);
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Meaning {
     pub meaning: String,
     pub primary: bool,
     pub accepted_answer: bool,
+}
+
+impl Answer for Meaning {
+    fn answer<'a>(&'a self) -> (&'a str, bool) {
+        (&self.meaning, self.accepted_answer)
+    }
 }
 
 pub enum AnswerResult {
@@ -406,83 +428,53 @@ pub enum AuxMeaningType
 }
 
 pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool, kana_input: &str) -> AnswerResult {
-    match subject {
-        Subject::KanaVocab(v) => is_meaning_correct(&v.data.meanings, &guess),
-        Subject::Radical(r) => is_meaning_correct(&r.data.meanings, &guess),
-        Subject::Kanji(k) => {
-            if is_meaning {
-                let best = is_meaning_correct(&k.data.meanings, &guess);
-                if let AnswerResult::Correct = best {
-                    return best;
-                }
+    let is_meaning = is_meaning || match subject {
+        Subject::Radical(_) => true,
+        Subject::KanaVocab(_) => true,
+        Subject::Kanji(_) => false,
+        Subject::Vocab(_) => false,
+    };
 
-                if let AnswerResult::Correct = is_reading_correct(&k.data.readings, kana_input) {
-                    return AnswerResult::KanaWhenMeaning;
-                }
-
-                return best;
-            }
-            else {
-                is_reading_correct(&k.data.readings, &guess)
-            }
-        },
-        Subject::Vocab(v) => {
-            if is_meaning {
-                let best = is_meaning_correct(&v.data.meanings, &guess);
-                if let AnswerResult::Correct = best {
-                    return best;
-                }
-
-                if let AnswerResult::Correct = is_vocab_reading_correct(&v.data.readings, kana_input) {
-                    return AnswerResult::KanaWhenMeaning;
-                }
-
-                return best;
-            }
-            else {
-                is_vocab_reading_correct(&v.data.readings, &guess)
-            }
-        },
-    }
-}
-
-pub fn is_vocab_reading_correct(readings: &Vec<VocabReading>, guess: &str) -> AnswerResult {
-    for reading in readings {
-        if reading.reading.trim().to_lowercase() == guess {
-            if reading.accepted_answer {
-                return AnswerResult::Correct;
-            }
-
-            return AnswerResult::MatchesNonAcceptedAnswer;
-        }
+    if is_meaning {
+        return match subject {
+            Subject::Radical(r) => {
+                is_correct(&r.data.meanings, &Vec::<Meaning>::new(), guess, kana_input)
+           },
+            Subject::KanaVocab(kv) => {
+                is_correct(&kv.data.meanings, &Vec::<Meaning>::new(), guess, kana_input)
+            },
+            Subject::Kanji(k) => {
+                is_correct(&k.data.meanings, &k.data.readings, guess, kana_input)
+            },
+            Subject::Vocab(v) => {
+                is_correct(&v.data.meanings, &v.data.readings, guess, kana_input)
+            },
+        };
     }
 
-    return AnswerResult::Incorrect;
+    return match subject {
+        Subject::Radical(_) => panic!("No readings for radical. should be unreachable."),
+        Subject::KanaVocab(_) => panic!("No readings for kana vocab. should be unreachable."),
+        Subject::Kanji(k) => is_correct(&k.data.readings, &Vec::<Meaning>::new(), guess, ""),
+        Subject::Vocab(v) => is_correct(&v.data.readings, &Vec::<Meaning>::new(), guess, ""),
+    };
 }
 
-pub fn is_reading_correct(readings: &Vec<KanjiReading>, guess: &str) -> AnswerResult {
-    for reading in readings {
-        if guess == reading.reading.trim().to_lowercase() {
-            if reading.accepted_answer {
-                return AnswerResult::Correct;
-            }
-
-            return AnswerResult::MatchesNonAcceptedAnswer;
-        }
-    }
-
-    return AnswerResult::Incorrect;
-}
-
-pub fn is_meaning_correct(meanings: &Vec<Meaning>, guess: &str) -> AnswerResult {
+fn is_correct<T, U>(meanings: &Vec<T>, readings: &Vec<U>, guess: &str, kana_input: &str) -> AnswerResult
+where T: Answer, U: Answer {
     let mut best = AnswerResult::Incorrect;
-    for meaning in meanings {
-        if guess == meaning.meaning.trim().to_lowercase() {
-            if meaning.accepted_answer {
+    for m in meanings {
+        let (meaning, is_accepted_answer) = m.answer();
+        if guess == meaning.trim().to_lowercase() {
+            if is_accepted_answer {
                 return AnswerResult::Correct;
             }
 
             best = AnswerResult::MatchesNonAcceptedAnswer;
+        }
+
+        if let AnswerResult::Correct = is_correct::<U, T>(readings, &vec![], kana_input, "") {
+            return AnswerResult::KanaWhenMeaning;
         }
     }
 
@@ -553,7 +545,7 @@ mod tests {
 
     use crate::wanidata::AnswerResult;
 
-    use super::{format_wani_text, is_correct_answer, AuxMeaning, Kanji, KanjiData, KanjiReading, Meaning, Subject, WaniFmtArgs, EMPTY_ARGS};
+    use super::{format_wani_text, is_correct_answer, AuxMeaning, KanaVocab, KanaVocabData, Kanji, KanjiData, KanjiReading, Meaning, Radical, RadicalData, Subject, Vocab, VocabData, VocabReading, WaniFmtArgs, EMPTY_ARGS};
 
     fn get_kanji(meanings: Vec<Meaning>, readings: Vec<KanjiReading>, aux_meanings: Vec<AuxMeaning>) -> Kanji {
         Kanji {
@@ -581,6 +573,135 @@ mod tests {
         }
     }
 
+    fn get_standard_radical() -> Radical {
+        let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+
+        get_radical(meanings, vec![])
+    }
+
+    fn get_radical(meanings: Vec<Meaning>, aux_meanings: Vec<AuxMeaning>) -> Radical {
+        Radical {
+            id: 1,
+            data: RadicalData {
+                aux_meanings,
+                meanings,
+                created_at: Utc::now(),
+                document_url: "".into(),
+                hidden_at: None,
+                lesson_position: 1,
+                level: 1,
+                meaning_mnemonic: "".into(),
+                slug: "".into(),
+                spaced_repetition_system_id: 1,
+                amalgamation_subject_ids: vec![],
+                characters: None,
+                character_images: vec![],
+            }
+        }
+    }
+
+    fn get_standard_kana_vocab() -> KanaVocab {
+    let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+        get_kana_vocab(meanings, vec![])
+    }
+
+    fn get_kana_vocab(meanings: Vec<Meaning>, aux_meanings: Vec<AuxMeaning>) -> KanaVocab {
+        KanaVocab {
+            id: 1,
+            data: KanaVocabData {
+                aux_meanings,
+                meanings,
+                created_at: Utc::now(),
+                document_url: "".into(),
+                hidden_at: None,
+                lesson_position: 1,
+                level: 1,
+                meaning_mnemonic: "".into(),
+                slug: "".into(),
+                spaced_repetition_system_id: 1,
+                characters: "".into(),
+                context_sentences: vec![],
+                parts_of_speech: vec![],
+                pronunciation_audios: vec![],
+            }
+        }
+    }
+
+    fn get_standard_vocab() -> super::Vocab {
+        let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+        let vocab_readings = vec![
+            VocabReading { 
+                reading: "not_はがねの".into(), 
+                primary: true, 
+                accepted_answer: false, 
+            },
+            VocabReading { 
+                reading: "はがねの".into(), 
+                primary: true, 
+                accepted_answer: true, 
+            },
+        ];
+        get_vocab(meanings, vocab_readings, vec![])
+    }
+
+    fn get_vocab(meanings: Vec<Meaning>, readings: Vec<VocabReading>, aux_meanings: Vec<AuxMeaning>) -> Vocab {
+        Vocab {
+            id: 1,
+            data: VocabData {
+                readings,
+                meanings,
+                aux_meanings,
+                created_at: Utc::now(),
+                document_url: "".into(),
+                hidden_at: None,
+                lesson_position: 1,
+                level: 1,
+                meaning_mnemonic: "".into(),
+                slug: "".into(),
+                spaced_repetition_system_id: 1,
+                characters: "".into(),
+                component_subject_ids: vec![],
+                context_sentences: vec![],
+                parts_of_speech: vec![],
+                pronunciation_audios: vec![],
+                reading_mnemonic: "".into(),
+            }
+        }
+    }
+
     fn get_standard_kanji() -> Kanji {
         let meanings = vec![
             Meaning {
@@ -596,13 +717,13 @@ mod tests {
         ];
         let kanji_readings = vec![
             KanjiReading { 
-                reading: "not_accepted_reading".into(), 
+                reading: "not_はがねの".into(), 
                 primary: true, 
                 accepted_answer: false, 
                 r#type: super::KanjiType::Nanori 
             },
             KanjiReading { 
-                reading: "accepted_reading".into(), 
+                reading: "はがねの".into(), 
                 primary: true, 
                 accepted_answer: true, 
                 r#type: super::KanjiType::Nanori 
@@ -611,8 +732,10 @@ mod tests {
         get_kanji(meanings, kanji_readings, vec![])
     }
 
+    // #region is_correct_answer Kanji
+
     #[test]
-    fn is_correct_answer_standard_accepted_kanji_meaning() {
+    fn is_correct_answer_accepted_kanji_meaning() {
         let is_meaning = true;
         let kanji = get_standard_kanji();
         let result = is_correct_answer(&Subject::Kanji(kanji), "accepted", is_meaning, "");
@@ -621,23 +744,21 @@ mod tests {
     }
 
     #[test]
-    fn is_correct_answer_accepted_kanji_meaning() {
-        let is_meaning = true;
+    fn is_correct_answer_accepted_kanji_reading() {
+        let is_meaning = false;
         let kanji = get_standard_kanji();
-        let result = is_correct_answer(&Subject::Kanji(kanji), "not_accepted", is_meaning, "");
+        let result = is_correct_answer(&Subject::Kanji(kanji), "はがねの", is_meaning, "");
 
-        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+        assert!(matches!(result, AnswerResult::Correct));
     }
 
     #[test]
-    fn is_correct_answer_accepted_with_whitespace_kanji_meaning() {
+    fn is_correct_answer_gave_kanji_reading_when_meaning() {
         let is_meaning = true;
         let kanji = get_standard_kanji();
-        //let meaning = kanji.data.meanings.first().unwrap();
-        //meaning.
-        let result = is_correct_answer(&Subject::Kanji(kanji), "accepted", is_meaning, "");
+        let result = is_correct_answer(&Subject::Kanji(kanji), "blah", is_meaning, "はがねの");
 
-        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+        assert!(matches!(result, AnswerResult::KanaWhenMeaning));
     }
 
     #[test]
@@ -650,6 +771,44 @@ mod tests {
     }
 
     #[test]
+    fn is_correct_answer_not_accepted_kanji_reading() {
+        let is_meaning = false;
+        let kanji = get_standard_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "not_はがねの", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_accepted_with_whitespace_kanji_meaning() {
+        let is_meaning = true;
+        let mut kanji = get_standard_kanji();
+        kanji.data.meanings.push(Meaning { 
+            meaning: " accepted1\n".into(), 
+            primary: false, 
+            accepted_answer: true 
+        });
+        let result = is_correct_answer(&Subject::Kanji(kanji), "accepted1", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_accepted_with_whitespace_kanji_reading() {
+        let is_meaning = false;
+        let mut kanji = get_standard_kanji();
+        kanji.data.readings.push(KanjiReading { 
+            reading: " はがねのの\n".into(), 
+            primary: false, 
+            accepted_answer: true,
+            r#type: crate::wanidata::KanjiType::Nanori,
+        });
+        let result = is_correct_answer(&Subject::Kanji(kanji), "はがねのの", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
     fn is_correct_answer_incorrect_kanji_meaning() {
         let is_meaning = true;
         let kanji = get_standard_kanji();
@@ -657,6 +816,221 @@ mod tests {
 
         assert!(matches!(result, AnswerResult::Incorrect));
     }
+
+    #[test]
+    fn is_correct_answer_incorrect_kanji_reading() {
+        let is_meaning = false;
+        let kanji = get_standard_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "foo", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    // #endregion is_correct_answer Kanji
+    
+    // #region is_correct_answer Vocab
+
+    #[test]
+    fn is_correct_answer_accepted_vocab_meaning() {
+        let is_meaning = true;
+        let vocab = get_standard_vocab();
+        let result = is_correct_answer(&Subject::Vocab(vocab), "accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_gave_reading_when_meaning() {
+        let is_meaning = true;
+        let vocab = get_standard_vocab();
+        let result = is_correct_answer(&Subject::Vocab(vocab), "blah", is_meaning, "はがねの");
+
+        assert!(matches!(result, AnswerResult::KanaWhenMeaning));
+    }
+
+    #[test]
+    fn is_correct_answer_accepted_vocab_reading() {
+        let is_meaning = false;
+        let vocab = get_standard_vocab();
+        let result = is_correct_answer(&Subject::Vocab(vocab), "はがねの", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_not_accepted_vocab_meaning() {
+        let is_meaning = true;
+        let vocab = get_standard_vocab();
+        let result = is_correct_answer(&Subject::Vocab(vocab), "not_accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_not_accepted_vocab_reading() {
+        let is_meaning = false;
+        let vocab = get_standard_vocab();
+        let result = is_correct_answer(&Subject::Vocab(vocab), "not_はがねの", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_accepted_with_whitespace_vocab_meaning() {
+        let is_meaning = true;
+        let mut vocab = get_standard_vocab();
+        vocab.data.meanings.push(Meaning { 
+            meaning: " accepted1\n".into(), 
+            primary: false, 
+            accepted_answer: true 
+        });
+        let result = is_correct_answer(&Subject::Vocab(vocab), "accepted1", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_accepted_with_whitespace_vocab_reading() {
+        let is_meaning = false;
+        let mut vocab = get_standard_vocab();
+        vocab.data.readings.push(VocabReading { 
+            reading: " はがねのの\n".into(), 
+            primary: false, 
+            accepted_answer: true,
+        });
+        let result = is_correct_answer(&Subject::Vocab(vocab), "はがねのの", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_incorrect_vocab_meaning() {
+        let is_meaning = true;
+        let vocab = get_standard_vocab();
+        let result = is_correct_answer(&Subject::Vocab(vocab), "foo", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    #[test]
+    fn is_correct_answer_incorrect_vocab_reading() {
+        let is_meaning = false;
+        let vocab = get_standard_vocab();
+        let result = is_correct_answer(&Subject::Vocab(vocab), "foo", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    // #endregion is_correct_answer Vocab
+
+    // #region is_correct_answer KanaVocab
+    
+    #[test]
+    fn is_correct_answer_accepted_kv() {
+        let is_meaning = true;
+        let kv = get_standard_kana_vocab();
+        let result = is_correct_answer(&Subject::KanaVocab(kv), "accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+    
+    #[test]
+    fn is_correct_answer_accepted_kv_ignores_is_meaning() {
+        let is_meaning = false;
+        let kv = get_standard_kana_vocab();
+        let result = is_correct_answer(&Subject::KanaVocab(kv), "accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_not_accepted_kv() {
+        let is_meaning = true;
+        let kv = get_standard_kana_vocab();
+        let result = is_correct_answer(&Subject::KanaVocab(kv), "not_accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_accepted_with_whitespace_kv() {
+        let is_meaning = true;
+        let mut kv = get_standard_kana_vocab();
+        kv.data.meanings.push(Meaning { 
+            meaning: " accepted1\n".into(), 
+            primary: false, 
+            accepted_answer: true 
+        });
+        let result = is_correct_answer(&Subject::KanaVocab(kv), "accepted1", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_incorrect_kv() {
+        let is_meaning = true;
+        let kv = get_standard_kana_vocab();
+        let result = is_correct_answer(&Subject::KanaVocab(kv), "foo", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    //
+    // #endregion is_correct_answer KanaVocab
+
+    // #region is_correct_answer Radical
+    
+    #[test]
+    fn is_correct_answer_accepted_radical() {
+        let is_meaning = true;
+        let radical = get_standard_radical();
+        let result = is_correct_answer(&Subject::Radical(radical), "accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+    
+    #[test]
+    fn is_correct_answer_accepted_radical_ignores_is_meaning() {
+        let is_meaning = false;
+        let radical = get_standard_radical();
+        let result = is_correct_answer(&Subject::Radical(radical), "accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_not_accepted_radical() {
+        let is_meaning = true;
+        let radical = get_standard_radical();
+        let result = is_correct_answer(&Subject::Radical(radical), "not_accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_accepted_with_whitespace_radical() {
+        let is_meaning = true;
+        let mut radical = get_standard_radical();
+        radical.data.meanings.push(Meaning { 
+            meaning: " accepted1\n".into(), 
+            primary: false, 
+            accepted_answer: true 
+        });
+        let result = is_correct_answer(&Subject::Radical(radical), "accepted1", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_incorrect_radical() {
+        let is_meaning = true;
+        let radical = get_standard_radical();
+        let result = is_correct_answer(&Subject::Radical(radical), "foo", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    // #endregion is_correct_answer Radical
 
     const TEST_ARGS: WaniFmtArgs = WaniFmtArgs {
         radical_args: super::WaniTagArgs { 
