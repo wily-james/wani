@@ -27,6 +27,62 @@ pub struct ResourcesUpdatedAssignment {
     pub data: Assignment,
 }
 
+#[derive(Debug)]
+pub struct RateLimit {
+    pub limit: usize,
+    pub remaining: usize,
+    pub reset: u64,
+}
+
+impl RateLimit {
+    pub fn from(headers: &reqwest::header::HeaderMap) -> Option<RateLimit> {
+        let limit = headers.get("RateLimit-Limit");
+        if let None = limit {
+            return None;
+        }
+        let limit = limit.unwrap().to_str();
+        if let Err(_) = limit {
+            return None;
+        }
+        let limit = limit.unwrap().parse();
+        if let Err(_) = limit {
+            return None;
+        }
+
+        let remaining = headers.get("RateLimit-Remaining");
+        if let None = remaining {
+            return None;
+        }
+        let remaining = remaining.unwrap().to_str();
+        if let Err(_) = remaining {
+            return None;
+        }
+        let remaining = remaining.unwrap().parse();
+        if let Err(_) = remaining {
+            return None;
+        }
+
+        let reset = headers.get("RateLimit-Reset");
+        if let None = reset {
+            return None;
+        } 
+        let reset = reset.unwrap().to_str();
+        if let Err(_) = reset {
+            return None;
+        }
+        let reset = reset.unwrap().parse();
+        if let Err(_) = reset {
+            return None;
+        }
+
+        return Some(RateLimit {
+            limit: limit.unwrap(),
+            remaining: remaining.unwrap(),
+            reset: reset.unwrap(),
+        })
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(tag="object")]
 pub enum WaniData
@@ -113,8 +169,8 @@ pub struct ReviewData {
 }
 
 #[derive(Debug, Serialize)]
-pub struct NewReviewRequest<'a> {
-    pub review: &'a NewReview,
+pub struct NewReviewRequest {
+    pub review: NewReview,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,6 +188,19 @@ pub struct NewReview {
 
     #[serde(skip_serializing)]
     pub status: ReviewStatus,
+}
+
+impl Clone for NewReview {
+    fn clone(&self) -> Self {
+        NewReview {
+            id: self.id,
+            assignment_id: self.assignment_id,
+            created_at: self.created_at,
+            incorrect_meaning_answers: self.incorrect_meaning_answers,
+            incorrect_reading_answers: self.incorrect_reading_answers,
+            status: self.status,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]

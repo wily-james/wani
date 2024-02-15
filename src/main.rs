@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::io::Write;
 use std::ops::Deref;
-use std::sync::{Arc, PoisonError};
-use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
+use tokio::sync::Mutex;
+use std::sync::{Arc, PoisonError}; use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
 use chrono::Utc;
@@ -28,6 +28,7 @@ use rusqlite::{
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::join;
+use tokio::task::JoinSet;
 use tokio_rusqlite::Connection as AsyncConnection;
 use console:: {
     pad_str, style, Emoji, Term
@@ -35,6 +36,7 @@ use console:: {
 use usvg::{PostProcessingSteps, TreeParsing};
 use wana_kana::ConvertJapanese;
 use image2ascii::image2ascii;
+use wanidata::RateLimit;
 
 #[derive(Parser)]
 struct Args {
@@ -83,6 +85,7 @@ enum Command {
     QueryReviews,
     ClearReviews,
     TestSubject,
+    TestThrottle,
 }
 
 /// Info saved to program config file
@@ -99,6 +102,16 @@ struct WaniWebConfig {
     revision: String,
 }
 
+impl Clone for WaniWebConfig {
+    fn clone(&self) -> Self {
+        WaniWebConfig {
+            client: self.client.clone(),
+            auth: self.auth.clone(),
+            revision: self.revision.clone(),
+        }
+    }
+}
+
 
 #[derive(Error, Debug)]
 enum WaniError {
@@ -113,6 +126,7 @@ enum WaniError {
     //Audio,
     Reqwest(#[from] reqwest::Error),
     Usvg(#[from] usvg::Error),
+    RateLimit(Option<wanidata::RateLimit>),
 }
 
 impl<T> From<PoisonError<T>> for WaniError {
@@ -135,9 +149,17 @@ impl Display for WaniError {
             //WaniError::Audio => f.write_str("Audio Playback Error."),
             WaniError::Reqwest(e) => e.fmt(f),
             WaniError::Usvg(e) => e.fmt(f),
+            WaniError::RateLimit(r) => {
+                match r {
+                    Some(r) => f.write_str(&format!("Rate Limit Exceeded Error: {:?}", r)),
+                    None => f.write_str("Rate limit error. could not parse rate limit info."),
+                }
+            },
         }
     }
 }
+
+type RateLimitBox = Arc<Mutex<Option<RateLimit>>>;
 
 // TODO - only pub to silence warning
 #[derive(Default)]
@@ -172,6 +194,7 @@ async fn main() -> Result<(), WaniError> {
                 Command::QueryReviews => command_query_reviews(&args),
                 Command::ClearReviews => command_clear_reviews(&args),
                 Command::TestSubject => command_test_subject(&args).await,
+                Command::TestThrottle => command_test_throttle(&args).await,
             };
         },
         None => command_summary(&args).await,
@@ -339,6 +362,7 @@ fn play_audio(audio_path: &PathBuf) -> Result<(), WaniError> {
 }
 
 async fn command_review(args: &Args) {
+    // TODO - fix these statistics wrt multiple batches
     fn print_review_screen(term: &Term, done: usize, guesses: usize, failed: usize, total_reviews: usize, width: usize, align: console::Alignment, char_lines: &Vec<String>, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
         term.clear_screen()?;
         let correct_percentage = if guesses == 0 { 100 } else { ((guesses as f64 - failed as f64) / guesses as f64 * 100.0) as i32 };
@@ -359,7 +383,7 @@ async fn command_review(args: &Args) {
     }
 
     // TODO - save reviews in another thread
-    async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: &AsyncConnection, web_config: &WaniWebConfig) -> Result<(), WaniError> {
+    async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: &AsyncConnection, web_config: &WaniWebConfig, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
         let reviews = Arc::new(reviews);
         let rev = reviews.clone();
         conn.call(move |conn| {
@@ -379,26 +403,34 @@ async fn command_review(args: &Args) {
             Ok(())
         }).await?;
 
-        let mut join_set = tokio::task::JoinSet::new();
+        //let mut futures = vec![];
+        let mut join_set = JoinSet::new();
         for (_, review) in reviews.deref() {
             if let ReviewStatus::Done = review.status {
                 let new_review = wanidata::NewReviewRequest {
-                    review
+                    review: review.clone()
                 };
 
-                let request = web_config.client
-                    .post("https://api.wanikani.com/v2/reviews/")
-                    .header("Wanikani-Revision", &web_config.revision)
-                    .bearer_auth(&web_config.auth)
-                    .json(&new_review);
+                let info = RequestInfo {
+                    url: "https://api.wanikani.com/v2/reviews/",
+                    method: RequestMethod::Post,
+                    query: None,
+                    json: Some(new_review),
+                };
 
-                join_set.spawn(request.send());
+                
+                let rate_limit = rate_limit.clone();
+                let web_config = web_config.clone();
+                join_set.spawn(async move {
+                    return send_throttled_request(info, rate_limit, web_config).await
+                });
             }
         }
 
+        //for response in futures::future::join_all(futures).await {
         while let Some(response) = join_set.join_next().await {
             if let Ok(response) = response {
-                match parse_response(response).await {
+                match response {
                     Ok((wani, _)) => {
                         match wani.data {
                             WaniData::Review(r) => {
@@ -439,56 +471,62 @@ async fn command_review(args: &Args) {
         Ok(())
     }
 
-    async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, conn: &AsyncConnection) -> Result<(), WaniError> {
+    async fn do_reviews(assignments: &mut Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, conn: &AsyncConnection, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
         assignments.reverse();
         let batch_size = min(1, assignments.len());
-        let mut batch = Vec::with_capacity(batch_size);
-        assignments.shuffle(&mut thread_rng());
-        for i in (assignments.len() - batch_size..assignments.len()).rev() {
-            batch.push(assignments.remove(i));
-        }
 
-        let mut reviews = HashMap::with_capacity(batch.len());
-        let now = Utc::now();
-        for nr in batch.iter().map(|a| wanidata::NewReview {
-            id: None,
-            assignment_id: a.id,
-            created_at: now,
-            incorrect_meaning_answers: 0,
-            incorrect_reading_answers: 0,
-            status: wanidata::ReviewStatus::NotStarted,
-        }) {
-            reviews.insert(nr.assignment_id, nr);
-        }
-
-        let res =  do_reviews_inner(assignments, subjects, audio_cache, web_config, p_config, image_cache, &mut reviews, &mut batch).await;
-        if let Err(e) = &res {
-            match &e {
-                WaniError::Io(err) => {
-                    match err.kind() {
-                        io::ErrorKind::Interrupted => {
-                            save_reviews(reviews, conn, web_config).await?;
-                            return Ok(())
-                        },
-                        _ => {},
-                    }
-                },
-                _ => {},
+        let mut review_result = None;
+        let total_assignments = assignments.len();
+        while assignments.len() > 0 {
+            let mut batch = Vec::with_capacity(batch_size);
+            assignments.shuffle(&mut thread_rng());
+            for i in (assignments.len() - batch_size..assignments.len()).rev() {
+                batch.push(assignments.remove(i));
             }
+
+            let mut reviews = HashMap::with_capacity(batch.len());
+            let now = Utc::now();
+            for nr in batch.iter().map(|a| wanidata::NewReview {
+                id: None,
+                assignment_id: a.id,
+                created_at: now,
+                incorrect_meaning_answers: 0,
+                incorrect_reading_answers: 0,
+                status: wanidata::ReviewStatus::NotStarted,
+            }) {
+                reviews.insert(nr.assignment_id, nr);
+            }
+
+            let res = do_reviews_inner(assignments, &subjects, audio_cache, web_config, p_config, image_cache, &mut reviews, &mut batch, total_assignments).await;
+            if let Err(e) = &res {
+                match &e {
+                    WaniError::Io(err) => {
+                        match err.kind() {
+                            io::ErrorKind::Interrupted => {
+                                save_reviews(reviews, conn, web_config, rate_limit).await?;
+                                return Ok(())
+                            },
+                            _ => {},
+                        }
+                    },
+                    _ => {},
+                }
+            }
+
+            review_result = Some(res);
+            save_reviews(reviews, conn, web_config, rate_limit).await?;
         }
 
-        save_reviews(reviews, conn, web_config).await?;
-        res
+        review_result.unwrap_or(Ok(()))
     }
 
-    async fn do_reviews_inner(assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>) -> Result<(), WaniError> {
+    async fn do_reviews_inner(assignments: &Vec<Assignment>, subjects: &HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>, total_reviews: usize) -> Result<(), WaniError> {
         enum AnswerColor {
             Green,
             Red,
             Gray
         }
         let term = Term::buffered_stdout();
-        let total_reviews = assignments.len();
         let mut done = 0;
         let mut failed = 0;
         let mut guesses = 0;
@@ -843,6 +881,7 @@ async fn command_review(args: &Args) {
     }
     let web_config = web_config.unwrap();
     let conn = setup_async_connection(args).await;
+    let rate_limit = Arc::new(Mutex::new(None));
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -855,7 +894,7 @@ async fn command_review(args: &Args) {
                 println!("Error loading assignments. Error: {}", e);
                 return;
             };
-            let assignments = assignments.unwrap();
+            let mut assignments = assignments.unwrap();
 
             let mut r_ids = vec![];
             let mut k_ids = vec![];
@@ -1019,7 +1058,7 @@ async fn command_review(args: &Args) {
             let _ = ctrlc::set_handler(move || {
                 println!("received Ctrl+C!");
             });
-            let res = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c).await;
+            let res = do_reviews(&mut assignments, subjects_by_id, &audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit).await;
             match res {
                 Ok(_) => {},
                 Err(e) => {println!("{:?}", e)},
@@ -1472,7 +1511,7 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
                 },
                 Err(e) => {
                     println!("Failed to fetch current assignment data. Error: {}", e);
-                    return Err(WaniError::Generic(e));
+                    return Err(e);
                 }
             }
         }
@@ -1737,6 +1776,45 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
         Err(e) => Err(e.1),
     }
 }
+async fn command_test_throttle(args: &Args) {
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+    }
+    let p_config = p_config.unwrap();
+    let web_config = get_web_config(&p_config);
+    if let Err(e) = web_config {
+        println!("{}", e);
+        return;
+    }
+
+    let web_config = web_config.unwrap();
+
+    let now = Utc::now().to_rfc3339();
+    let rate_limit = Arc::new(Mutex::new(Some(RateLimit {
+        limit: 60,
+        remaining: 1,
+        reset: u64::try_from(Utc::now().timestamp() + 3).unwrap(),
+    })));
+
+    println!("{:?}", rate_limit);
+
+    for i in 0..150 {
+        let info = RequestInfo {
+            url: "https://api.wanikani.com/v2/assignments",
+            method: RequestMethod::Get,
+            query: Some(vec![("updated_after", &now)]),
+            json: None::<bool>,
+        };
+
+        let rate_limit_local = rate_limit.clone();
+        let web_config = web_config.clone();
+        let _ = send_throttled_request(info, rate_limit_local, web_config).await;
+        println!("{} - {:?}", i, rate_limit.lock().await.deref());
+    }
+
+    println!("All Done!");
+}
 
 async fn command_test_subject(args: &Args) {
     let p_config = get_program_config(args);
@@ -1751,10 +1829,11 @@ async fn command_test_subject(args: &Args) {
     }
 
     let web_config = web_config.unwrap();
+    let query = &[("levels", "5")];
     let response = web_config.client
         .get("https://api.wanikani.com/v2/subjects")
         .header("Wanikani-Revision", &web_config.revision)
-        .query(&[("levels", "5")])
+        .query(query)
         .bearer_auth(web_config.auth)
         .send();
 
@@ -1764,35 +1843,161 @@ async fn command_test_subject(args: &Args) {
     }
 }
 
-async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(WaniResp, reqwest::header::HeaderMap), String> {
+enum RequestMethod {
+    Get,
+    Post,
+}
+
+struct RequestInfo<'a, T: serde::Serialize + Sized> {
+    url: &'a str,
+    method: RequestMethod,
+    query: Option<Vec<(&'a str, &'a str)>>,
+    json: Option<T>,
+}
+
+fn build_request<'a, T: serde::Serialize + Sized>(info: &RequestInfo<'a, T>, web_config: &WaniWebConfig) -> reqwest::RequestBuilder {
+    let request = match info.method {
+        RequestMethod::Get => web_config.client.get(info.url),
+        RequestMethod::Post => web_config.client.post(info.url),
+    };
+
+    let mut request = request 
+        .header("Wanikani-Revision", &web_config.revision)
+        .bearer_auth(&web_config.auth);
+
+    if let Some(queries) = &info.query {
+        if queries.len() > 0 {
+            request = request.query(&queries);
+        }
+    }
+
+    if let Some(json) = &info.json {
+        request = request.json(json);
+    }
+
+    request
+}
+
+async fn send_throttled_request<'a, T: serde::Serialize + Sized>(info: RequestInfo<'a, T>, rate_limit: RateLimitBox, web_config: WaniWebConfig) -> Result<(WaniResp, reqwest::header::HeaderMap), WaniError> {
+    loop {
+        'wait: loop {
+            if let Some(rl) = rate_limit.deref().lock().await.deref() {
+                if rl.remaining == 0 {
+                    let diff;
+                    let now = Utc::now().timestamp();
+                    if let Ok(n) = u64::try_from(now) {
+                        if rl.reset <= n {
+                            println!("Reset reached. No longer waiting.");
+                            break 'wait;
+                        }
+
+                        diff = rl.reset - n;
+                    }
+                    else {
+                        break 'wait;
+                    }
+
+                    println!("Waiting for {} secs.", diff);
+                    tokio::time::sleep(std::time::Duration::from_secs(diff)).await;
+                }
+                else {
+                    break 'wait;
+                }
+            }
+            else {
+                break 'wait;
+            }
+        }
+
+        let request = build_request(&info, &web_config);
+        let res = parse_response(request.send().await).await;
+        match res {
+            Ok((wani, headers, new_rl)) => {
+                // Update with newest rate-limit
+                match new_rl {
+                    Some(new_rl) => {
+                        let mut rate_limit = rate_limit.deref().lock().await;
+                        match rate_limit.deref() {
+                            Some(old_rl) => {
+                                if old_rl.reset < new_rl.reset {
+                                    *rate_limit = Some(new_rl);
+                                }
+                            },
+                            None => {
+                                *rate_limit = Some(new_rl);
+                            }
+                        }
+                    },
+                    None => {
+                        *rate_limit.deref().lock().await = None;
+                    },
+                }
+
+                return Ok((wani, headers))
+            },
+            Err(e) => {
+                match e {
+                    WaniError::RateLimit(new_rl) => {
+                        // Update with newest rate-limit
+                        match new_rl {
+                            Some(new_rl) => {
+                                let mut rate_limit = rate_limit.deref().lock().await;
+                                match rate_limit.deref() {
+                                    Some(old_rl) => {
+                                        if old_rl.reset < new_rl.reset {
+                                            *rate_limit = Some(new_rl);
+                                        }
+                                    },
+                                    None => {
+                                        *rate_limit = Some(new_rl);
+                                    }
+                                }
+                            },
+                            None => {
+                                *rate_limit.deref().lock().await = None;
+                            },
+                        }
+                    }
+                    _ => return Err(e),
+                }
+            }
+        }
+    }
+}
+
+async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(WaniResp, reqwest::header::HeaderMap, Option<wanidata::RateLimit>), WaniError> {
     match response {
         Err(s) => {
-            Err(format!("Error with request: {}", s))
+            Err(WaniError::Generic(format!("Error with request: {}", s)))
         },
 
         Ok(r) => {
             match r.status() {
                 StatusCode::OK => {
                     let headers = r.headers().to_owned();
+                    let ratelimit = wanidata::RateLimit::from(&headers);
                     let wani = r.json::<WaniResp>().await;
                     match wani {
-                        Err(s) => Err(format!("Error parsing HTTP 200 response: {}", s)),
+                        Err(s) => Err(WaniError::Generic(format!("Error parsing HTTP 200 response: {}", s))),
                         Ok(w) => {
-                            Ok((w, headers))
+                            Ok((w, headers, ratelimit))
                         },
                     }
                 },
                 StatusCode::CREATED => {
                     let headers = r.headers().to_owned();
+                    let ratelimit = wanidata::RateLimit::from(&headers);
                     let wani = r.json::<WaniResp>().await;
                     match wani {
-                        Err(s) => Err(format!("Error parsing HTTP 201 response: {}", s)),
+                        Err(s) => Err(WaniError::Generic(format!("Error parsing HTTP 201 response: {}", s))),
                         Ok(w) => {
-                            Ok((w, headers))
+                            Ok((w, headers, ratelimit))
                         },
                     }
                 },
                 StatusCode::NOT_MODIFIED => {
+                    let headers = r.headers().to_owned();
+                    let ratelimit = wanidata::RateLimit::from(&headers);
                     Ok((WaniResp {
                         url: r.url().to_string(),
                         data_updated_at: None,
@@ -1805,18 +2010,23 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
                             },
                         }),
                         resources_updated: None,
-                    }, r.headers().to_owned()))
+                    }, headers, ratelimit))
                 },
                 StatusCode::UNAUTHORIZED => {
-                    Err(format!("HTTP 401: Unauthorized. Make sure your wanikani auth token is correct, and hasn't been expired."))
+                    Err(WaniError::Generic(format!("HTTP 401: Unauthorized. Make sure your wanikani auth token is correct, and hasn't been expired.")))
                 },
                 StatusCode::TOO_MANY_REQUESTS => {
-                    Err(format!("Wanikani API rate limit exceeded."))
+                    println!("Rate limit hit");
+                    let limit = wanidata::RateLimit::from(r.headers());
+                    if let None = limit {
+                        println!("Expected rate limit but none hit");
+                    }
+                    Err(WaniError::RateLimit(wanidata::RateLimit::from(r.headers())))
                 },
                 StatusCode::UNPROCESSABLE_ENTITY => {
-                    Err(format!("Unprocessable Enitity. {}", r.text().await.unwrap_or("Unprocessable Entity.".to_owned())))
+                    Err(WaniError::Generic(format!("Unprocessable Enitity. {}", r.text().await.unwrap_or("Unprocessable Entity.".to_owned()))))
                 },
-                _ => { Err(format!("HTTP status code {}", r.status())) },
+                _ => { Err(WaniError::Generic(format!("HTTP status code {}", r.status()))) },
             }
         },
     }
@@ -1981,7 +2191,8 @@ fn get_program_config(args: &Args) -> Result<ProgramConfig, WaniError> {
     let mut config = ProgramConfig { 
         auth: None, 
         //configpath: configpath.clone(), 
-        colorblind: false };
+        colorblind: false,
+    };
     if let Ok(lines) = read_lines(&configpath) {
         for line in lines {
             if let Ok(s) = line {
