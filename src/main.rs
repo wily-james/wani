@@ -1,59 +1,24 @@
-use std::{fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
-use clap::Parser;
-use serde::Deserialize;
-use chrono::{
-    DateTime,
-    Utc,
+mod wanidata;
+
+use crate::wanidata::{
+    WaniData,
+    WaniResp
 };
+use std::{fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
+use clap::{Parser, Subcommand};
+use chrono::Utc;
 use reqwest::{
     blocking::Client, StatusCode
     //Error,
 };
 use rusqlite::Connection;
 
-#[derive(Deserialize, Debug)]
-#[serde(tag="object")]
-enum WaniData
-{
-    Collection,
-    #[serde(rename="report")]
-    Report(Summary),
-}
-
-#[derive(Debug, Deserialize)]
-struct WaniResp {
-    //url: String,
-    //data_updated_at: Option<String>, // TODO - optional for collections if no elements, mandatory
-    #[serde(flatten)]
-    data: WaniData
-}
-
-#[derive(Deserialize, Debug)]
-struct Summary {
-    data: SummaryData
-}
-
-#[derive(Deserialize, Debug)]
-struct SummaryData {
-    lessons: Vec<Lesson>,
-    //next_reviews_at: Option<String>,
-    reviews: Vec<SummaryReview>
-}
-
-#[derive(Deserialize, Debug)]
-struct SummaryReview {
-    available_at: DateTime<Utc>,
-    subject_ids: Vec<i32>,
-}
-
-#[derive(Deserialize, Debug)]
-struct Lesson {
-    available_at: DateTime<Utc>,
-    subject_ids: Vec<i32>
-}
-
 #[derive(Parser)]
 struct Args {
+    /// Subcommand to run. Default is summary
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Specifies the Wanikani API personal access token to use.
     /// See: https://www.wanikani.com/settings/personal_access_tokens
     #[arg(short, long, value_name = "TOKEN")]
@@ -68,12 +33,42 @@ struct Args {
     configfile: Option<PathBuf>,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Lists a summary of the Lessons and Reviews that are currently available. This is the
+    /// default command
+    Summary,
+    /// a shorthand for the 'summary' command
+    S,
+    /// Does first-time initialization
+    Init,
+    TestSubject,
+}
+
 struct ProgramConfig {
     auth: Option<String>,
 }
 
+#[derive(Debug)]
+struct Error {
+    msg: String
+}
+
 fn main() {
-    wani_summary();
+    let args = Args::parse();
+
+    match &args.command {
+        Some(c) => {
+            match c {
+                Command::Summary => wani_summary(&args),
+                Command::S => wani_summary(&args),
+                Command::Init => wani_init(&args),
+                Command::TestSubject => wani_test_subject(&args)
+            }
+        },
+        None => wani_summary(&args),
+    }
+
 }
 
 fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
@@ -82,11 +77,100 @@ where P: AsRef<Path>, {
     Ok(io::BufReader::new(file).lines())
 }
 
-fn wani_summary() {
-    let args = Args::parse();
+fn setup_connection(args: &Args) -> Result<Connection, Error> {
+    let mut datapath = PathBuf::new();
+    if let Some(dpath) = &args.datapath {
+        datapath.push(dpath);
+    }
+    else {
+        match home::home_dir() {
+            Some(h) => {
+                datapath.push(h);
+                datapath.push(".wani");
+            },
+            None => {
+                return Err(Error { msg: "Could not find home directory. Please manually specify datapath arg. Use \"wani -help\" for more details.".into() });
+            }
+        }
+    }
+    
+    if !Path::exists(&datapath)
+    {
+        if let Err(s) = fs::create_dir(&datapath) {
+            return Err(Error { msg: format!("Could not create datapath at {}\nError: {}", datapath.display(), s) });
+        }
+    }
 
+    let mut db_path = PathBuf::from(&datapath);
+    db_path.push("wani_cache.db");
+
+    match Connection::open(&db_path) {
+        Err(e) => Err(Error { msg: format!("{}", e) }),
+        Ok(c) => Ok(c),
+    }
+}
+
+fn wani_init(args: &Args) {
+    let conn = setup_connection(&args);
+    match conn {
+        Err(e) => println!("{}", e.msg),
+        Ok(c) => {
+
+        },
+    };
+}
+
+fn wani_test_subject(args: &Args) {
+    let web_config = get_web_config(&args);
+    if let Err(e) = web_config {
+        println!("{}", e.msg);
+        return;
+    }
+
+    let web_config = web_config.unwrap();
+    let client = Client::new();
+    let response = client
+        .get("https://api.wanikani.com/v2/subjects")
+        .header("Wanikani-Revision", "20170710")
+        .query(&[("levels", "5")])
+        .bearer_auth(web_config.auth)
+        .send();
+
+    match response {
+        Err(s) => {
+            println!("Error with request: {}", s)
+        },
+
+        Ok(r) => {
+            match r.status() {
+                StatusCode::OK => {
+                    let wani = r.json::<WaniResp>();
+                    match wani {
+                        Err(s) => println!("Error parsing HTTP 200 response: {}", s),
+                        Ok(w) => {
+                            handle_wani_resp(w);
+                        },
+                    }
+                },
+                StatusCode::UNAUTHORIZED => {
+                    println!("HTTP 401: Unauthorized. Make sure your wanikani auth token is correct, and hasn't been expired.");
+                },
+                StatusCode::TOO_MANY_REQUESTS => {
+                    println!("Wanikani API rate limit exceeded.");
+                },
+                _ => { println!("HTTP status code {}", r.status()) },
+            };
+        },
+    }
+}
+
+struct WaniWebConfig {
+    auth: String
+}
+
+fn get_web_config(args: &Args) -> Result<WaniWebConfig, Error> {
     let mut configpath = PathBuf::new();
-    if let Some(path) = args.configfile {
+    if let Some(path) = &args.configfile {
         configpath.push(path);
     }
     else {
@@ -99,15 +183,13 @@ fn wani_summary() {
                 if !Path::exists(&configpath)
                 {
                     if let Err(s) = fs::create_dir(&configpath) {
-                        println!("Could not create wani config folder at {}\nError: {}", configpath.display(), s);
-                        return;
+                        return Err(Error { msg: format!("Could not create wani config folder at {}\nError: {}", configpath.display(), s) });
                     }
                 }
                 configpath.push(".wani.conf");
             },
             None => {
-                println!("Could not find home directory. Please manually specify configpath arg. Use \"wani -help\" for more details.");
-                return;
+                return Err(Error { msg: format!("Could not find home directory. Please manually specify configpath arg. Use \"wani -help\" for more details.") });
             }
         };
     }
@@ -142,49 +224,24 @@ fn wani_summary() {
         auth = String::from(a);
     }
     else {
-        println!("Need to specify a wanikani access token");
+        return Err(Error { msg: format!("Need to specify a wanikani access token") });
+    }
+
+    return Ok(WaniWebConfig { auth });
+}
+
+fn wani_summary(args: &Args) {
+    let web_config = get_web_config(&args);
+    if let Err(e) = web_config {
+        println!("{}", e.msg);
         return;
     }
-
-    let mut datapath = PathBuf::new();
-    if let Some(dpath) = args.datapath {
-        datapath.push(dpath);
-    }
-    else {
-        match home::home_dir() {
-            Some(h) => {
-                datapath.push(h);
-                datapath.push(".wani");
-            },
-            None => {
-                println!("Could not find home directory. Please manually specify datapath arg. Use \"wani -help\" for more details.");
-                return;
-            }
-        }
-    }
-    
-    if !Path::exists(&datapath)
-    {
-        if let Err(s) = fs::create_dir(&datapath) {
-            println!("Could not create datapath at {}\nError: {}", datapath.display(), s);
-            return;
-        }
-    }
-
-    let mut db_path = PathBuf::from(&datapath);
-    db_path.push("wani_cache.db");
-    let conn = Connection::open(&db_path);
-    if let Err(e) = conn {
-        println!("{}", e);
-        return;
-    }
-    let conn = conn.unwrap();
-
+    let web_config = web_config.unwrap();
     let client = Client::new();
     let response = client
         .get("https://api.wanikani.com/v2/summary")
         .header("Wanikani-Revision", "20170710")
-        .bearer_auth(auth)
+        .bearer_auth(web_config.auth)
         .send();
 
     match response {
@@ -236,6 +293,13 @@ fn handle_wani_resp(w: WaniResp) -> () {
             }
 
             println!("Reviews: {:?}", count);
+        },
+
+        WaniData::Collection(collection) => {
+            println!("Collection: ");
+            for data in collection.data {
+                println!("{:?}", data);
+            }
         },
 
         _ => {
