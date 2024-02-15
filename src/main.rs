@@ -88,7 +88,8 @@ impl Display for WaniError {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), WaniError> {
     let args = Args::parse();
 
     match &args.command {
@@ -106,11 +107,12 @@ fn main() {
                 Command::QueryKanji => command_query_kanji(&args),
                 Command::QueryVocab => command_query_vocab(&args),
                 Command::TestSubject => command_test_subject(&args),
-            }
+            };
         },
         None => command_summary(&args),
-    }
+    };
 
+    Ok(())
 }
 
 fn command_query_vocab(args: &Args) {
