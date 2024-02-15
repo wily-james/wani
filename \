@@ -9,7 +9,6 @@ use std::io::Write;
 use std::ops::Deref;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
-use wanidata::ContextSentence;
 use wanidata::WaniFmtArgs;
 use std::sync::{Arc, PoisonError}; use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
@@ -608,7 +607,6 @@ async fn command_review(args: &Args) {
                 break 'subject;
             }
             batch.shuffle(rng);
-            /*  
             let assignment = batch.iter().find_or_last(|a| { 
                 let subj = subjects.get(&a.data.subject_id).unwrap();
                 if let wanidata::Subject::KanaVocab(_) = subj {
@@ -616,8 +614,7 @@ async fn command_review(args: &Args) {
                 }
                 false
             }).unwrap();
-            */
-            let assignment = batch.last().unwrap();
+            //let assignment = batch.last().unwrap();
             //let subj_id = assignment.data.subject_id;
             let review = reviews.get_mut(&assignment.id).unwrap();
             let subject = subjects.get(&assignment.data.subject_id);
@@ -1166,32 +1163,6 @@ async fn list_kanji_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str,
     lines
 }
 
-fn get_context_sentences(sentences: &Vec<ContextSentence>, width: usize, text_width: usize) -> Vec<String> {
-    let mut lines = vec![];
-    let left = console::Alignment::Left;
-    lines.push(pad_str("Context Sentences:", width, left, None).to_string());
-    for sent in sentences {
-        //lines.push(pad_str("English:", width, left, None).to_string());
-        let mut sent_lines = vec![];
-        split_str_by_len(&sent.ja, text_width, &mut sent_lines);
-        for ele in &sent_lines {
-            let mut line = String::from("\t");
-            line.push_str(&ele);
-            lines.push(pad_str(&line, width, left, None).to_string());
-        }
-        sent_lines.clear();
-        //lines.push(pad_str("日本語:", width, left, None).to_string());
-        split_str_by_len(&sent.en, text_width, &mut sent_lines);
-        for ele in sent_lines {
-            let mut line = String::from("\t");
-            line.push_str(&ele);
-            lines.push(pad_str(&line, width, left, None).to_string());
-        }
-        lines.push("".into());
-    }
-    lines
-}
-
 async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, text_width: usize, align: console::Alignment, wfmt_args: &WaniFmtArgs<'_>, is_meaning: bool, conn: &AsyncConnection) -> Vec<String> {
     match subject {
         // 0 - radical name, mnemonic, user synonyms, user note
@@ -1348,7 +1319,29 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
                     lines
                 },
                 2 => {
-                    get_context_sentences(&v.data.context_sentences, width, text_width)
+                    let mut lines = vec![];
+                    let left = console::Alignment::Left;
+                    lines.push(pad_str("Context Sentences:", width, left, None).to_string());
+                    for sent in &v.data.context_sentences {
+                        //lines.push(pad_str("English:", width, left, None).to_string());
+                        let mut sent_lines = vec![];
+                        split_str_by_len(&sent.ja, text_width, &mut sent_lines);
+                        for ele in &sent_lines {
+                            let mut line = String::from("\t");
+                            line.push_str(&ele);
+                            lines.push(pad_str(&line, width, left, None).to_string());
+                        }
+                        sent_lines.clear();
+                        //lines.push(pad_str("日本語:", width, left, None).to_string());
+                        split_str_by_len(&sent.en, text_width, &mut sent_lines);
+                        for ele in sent_lines {
+                            let mut line = String::from("\t");
+                            line.push_str(&ele);
+                            lines.push(pad_str(&line, width, left, None).to_string());
+                        }
+                        lines.push("".into());
+                    }
+                    lines
                 },
                 3 => {
                     let mut lines = vec![];
@@ -1386,35 +1379,23 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
 
         // 0 - kana vocab meaning, mnemonic, TODO hint, part of speech
         // TODO 1 - user synonym, user note
-        // 1 - context sentences
+        // 2 - context sentences
         Subject::KanaVocab(kv) => {
-            let num_choices = 2;
-            let info_status = info_status % num_choices;
-
-            match info_status {
-                0 => {
-                    let mut lines = vec![];
-                    let meanings = kv.primary_meanings()
-                        .join(", ");
-                    if meanings.len() > 0 {
-                        lines.push(pad_str(&meanings, width, align, None).to_string());
-                    }
-                    let alt_meanings = kv.alt_meanings()
-                        .join(", ");
-                    if alt_meanings.len() > 0 {
-                        lines.push(pad_str(&alt_meanings, width, align, None).to_string());
-                    }
-                    lines.push("---".to_owned());
-                    let mnemonic = wanidata::format_wani_text(&kv.data.meaning_mnemonic, &wfmt_args);
-                    split_str_by_len(&mnemonic, text_width, &mut lines);
-                    lines
-                },
-                1 => {
-                    get_context_sentences(&kv.data.context_sentences, width, text_width)
-                },
-                _ => { vec![] },
+            let mut lines = vec![];
+            let meanings = kv.primary_meanings()
+                .join(", ");
+            if meanings.len() > 0 {
+                lines.push(pad_str(&meanings, width, align, None).to_string());
             }
-
+            let alt_meanings = kv.alt_meanings()
+                .join(", ");
+            if alt_meanings.len() > 0 {
+                lines.push(pad_str(&alt_meanings, width, align, None).to_string());
+            }
+            lines.push("---".to_owned());
+            let mnemonic = wanidata::format_wani_text(&kv.data.meaning_mnemonic, &wfmt_args);
+            split_str_by_len(&mnemonic, text_width, &mut lines);
+            lines
         },
     }
 }
