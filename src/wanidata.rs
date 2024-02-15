@@ -192,7 +192,8 @@ pub struct RadicalData {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RadicalImage
 {
-    pub url: String
+    pub url: String,
+    pub content_type: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]

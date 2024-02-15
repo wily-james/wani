@@ -1,11 +1,12 @@
 mod wanidata;
 mod wanisql;
 
-use crate::wanidata::{Assignment, PronunciationAudio, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
+use crate::wanidata::{Assignment, PronunciationAudio, RadicalImage, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::ops::Deref;
+use std::os::unix::fs::FileExt;
 use std::sync::PoisonError;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
@@ -17,19 +18,23 @@ use rand::{thread_rng, Rng};
 use reqwest::{
     Response, Client, StatusCode
 };
+use resvg::usvg::{self, Tree};
+use rgb::FromSlice;
 use rodio::{Decoder, OutputStream, Sink};
 use rusqlite::params;
 use rusqlite::{
     Connection, Error as SqlError
 };
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt };
 use tokio::join;
 use tokio_rusqlite::Connection as AsyncConnection;
 use console:: {
     pad_str, style, Emoji, Term
 };
+use usvg::{PostProcessingSteps, TreeParsing, TreeWriting, XmlOptions};
 use wana_kana::ConvertJapanese;
+use image2ascii::{image2ascii, Char2DArray};
 
 #[derive(Parser)]
 struct Args {
@@ -105,6 +110,7 @@ enum WaniError {
     Io(#[from] std::io::Error),
     //Audio,
     Reqwest(#[from] reqwest::Error),
+    Usvg(#[from] usvg::Error),
 }
 
 impl<T> From<PoisonError<T>> for WaniError {
@@ -126,6 +132,7 @@ impl Display for WaniError {
             WaniError::Io(e) => e.fmt(f),
             //WaniError::Audio => f.write_str("Audio Playback Error."),
             WaniError::Reqwest(e) => e.fmt(f),
+            WaniError::Usvg(e) => e.fmt(f),
         }
     }
 }
@@ -299,7 +306,7 @@ fn play_audio(audio_path: &PathBuf) -> Result<(), WaniError> {
 }
 
 async fn command_review(args: &Args) {
-    fn print_review_screen(term: &Term, done: usize, guesses: usize, failed: usize, total_reviews: usize, width: usize, align: console::Alignment, char_line: &str, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
+    fn print_review_screen(term: &Term, done: usize, guesses: usize, failed: usize, total_reviews: usize, width: usize, align: console::Alignment, char_lines: &Vec<String>, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
         term.clear_screen()?;
         let correct_percentage = if guesses == 0 { 100 } else { ((guesses as f64 - failed as f64) / guesses as f64 * 100.0) as i32 };
         term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", 
@@ -307,7 +314,9 @@ async fn command_review(args: &Args) {
                                          Emoji("\u{2705}", "Done"), done, 
                                          Emoji("\u{1F4E9}", "Remaining"), total_reviews - done), 
                                 width, align, None).deref())?;
-        term.write_line(&char_line)?;
+        for char_line in char_lines {
+            term.write_line(char_line)?;
+        }
         term.write_line(pad_str(&format!("{}:", review_type_text), width, align, None).deref())?;
         term.write_line(input)?;
         if let Some(t) = toast {
@@ -316,7 +325,7 @@ async fn command_review(args: &Args) {
         Ok(())
     }
 
-    async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig) -> Result<(), WaniError> {
+    async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf) -> Result<(), WaniError> {
         enum AnswerColor {
             Green,
             Red,
@@ -326,6 +335,7 @@ async fn command_review(args: &Args) {
         let rng = &mut thread_rng();
         let width = 80;
         let text_width = 50;
+        let radical_width = 50;
         let align = console::Alignment::Center;
         let correct_msg = if p_config.colorblind { Some("Correct") } else { None };
         let incorrect_msg = if p_config.colorblind { Some("Inorrect") } else { None };
@@ -397,7 +407,16 @@ async fn command_review(args: &Args) {
                 break 'subject;
             }
             batch.shuffle(rng);
-            let assignment = batch.last().unwrap();
+            //let assignment = batch.last().unwrap();
+            let assignment = batch.iter().find_or_last(|s| {
+                let subject = subjects.get(&s.data.subject_id).unwrap();
+                if let wanidata::Subject::Radical(s) = subject {
+                    if let None = s.data.characters {
+                        return s.data.character_images.len() > 0;
+                    }
+                }
+                false
+            }).unwrap();
             let subj_id = assignment.data.subject_id;
             let review = reviews.get_mut(&assignment.id).unwrap();
             let subject = subjects.get(&assignment.data.subject_id);
@@ -407,10 +426,46 @@ async fn command_review(args: &Args) {
             }
             let subject = subject.unwrap();
             let characters = match subject {
-                Subject::Radical(r) => if let Some(c) = &r.data.characters { &c } else { "Radical with no text"},
-                Subject::Kanji(k) => &k.data.characters,
-                Subject::Vocab(v) => &v.data.characters,
-                Subject::KanaVocab(kv) => &kv.data.characters,
+                Subject::Radical(r) => { 
+                    let rad_chars;
+                    if let Some(c) = &r.data.characters { 
+                        rad_chars = vec![c.to_owned()];
+                    } else { 
+                        let res = get_radical_image(r, image_cache, radical_width, web_config).await;
+                        match res {
+                            Ok(rl) => {
+                                let mut lines = Vec::new();
+                                let mut found_non_empty = false;
+                                for line in rl {
+                                    if let Ok(l) = line {
+                                        if found_non_empty || l.chars().any(|c| c != ' ') {
+                                            found_non_empty = true;
+                                            lines.push(l);
+                                        }
+                                    }
+                                }
+
+                                for i in (0..lines.len()).rev() {
+                                    if lines[i].chars().any(|c| c != ' ') {
+                                        break;
+                                    }
+                                    lines.pop();
+                                }
+
+                                rad_chars = lines;
+                            }
+                            Err(e) => {
+                                rad_chars = vec!["Error creating radical image".to_owned()];
+                                println!("{}", e);
+                                term.read_key()?;
+                            }
+                        }
+                    };
+                    rad_chars
+                },
+                Subject::Kanji(k) => vec![k.data.characters.to_owned()],
+                Subject::Vocab(v) => vec![v.data.characters.to_owned()],
+                Subject::KanaVocab(kv) => vec![kv.data.characters.to_owned()],
             };
             let is_meaning = match subject {
                 Subject::Radical(_) => true,
@@ -438,15 +493,16 @@ async fn command_review(args: &Args) {
                 Subject::Vocab(_) => if is_meaning { "Vocab Meaning" } else { "Vocab Reading" },
                 Subject::KanaVocab(_) => "Vocab Meaning",
             };
-            let padded_chars = pad_str(characters, width, align, None);
-            let char_line = match subject {
-                Subject::Radical(_) => style(padded_chars).white().on_blue().to_string(),
-                Subject::Kanji(_) => style(padded_chars).white().on_red().to_string(),
-                _ => style(padded_chars).white().on_magenta().to_string(),
-            };
+            let padded_chars = characters.iter().map(|l| pad_str(l, width, align, None));
+            let char_line = padded_chars.map(|pc| match subject {
+                Subject::Radical(_) => style(pc).white().on_blue().to_string(),
+                Subject::Kanji(_) => style(pc).white().on_red().to_string(),
+                _ => style(pc).white().on_magenta().to_string(),
+            }).collect_vec();
+
             let mut toast = None;
             print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, "")?;
-            term.move_cursor_to(width / 2, 3)?;
+            term.move_cursor_to(width / 2, 2 + characters.len())?;
             term.flush()?;
 
             'input: loop {
@@ -474,7 +530,7 @@ async fn command_review(args: &Args) {
                     let input_padded = pad_str(&vis_input, width, align, None);
                     print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_padded)?;
                     let input_width = console::measure_text_width(&vis_input);
-                    term.move_cursor_to(width / 2 + input_width / 2, 3)?;
+                    term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
                     term.flush()?;
                 }
 
@@ -557,7 +613,7 @@ async fn command_review(args: &Args) {
 
                 print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
                 let input_width = console::measure_text_width(&vis_input);
-                term.move_cursor_to(width / 2 + input_width / 2, 3)?;
+                term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
                 term.flush()?;
 
                 let mut showing_info = false;
@@ -581,7 +637,7 @@ async fn command_review(args: &Args) {
                                         _ => false,
                                     };
                                     if can_play_audio {
-                                        let _ = play_audio_for_subj(subject, audio_cache, web_config, &term).await;
+                                        let _ = play_audio_for_subj(subject, audio_cache, web_config).await;
                                     }
                                 },
                                 _ => {},
@@ -627,7 +683,7 @@ async fn command_review(args: &Args) {
                         }
                     }
 
-                    term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
+                    term.move_cursor_to(width / 2 + input.len() / 2, 2 + char_line.len())?;
                     term.flush()?;
                 }
 
@@ -638,7 +694,7 @@ async fn command_review(args: &Args) {
                 toast = None;
                 print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &"")?;
                 let input_width = 0;
-                term.move_cursor_to(width / 2 + input_width / 2, 3)?;
+                term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
                 term.flush()?;
             }
         }
@@ -831,13 +887,180 @@ async fn command_review(args: &Args) {
                 return;
             }
 
-            let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config, &p_config).await;
+            let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap()).await;
         },
     };
 }
 
-async fn play_audio_for_subj(subject: &Subject, audio_cache: &PathBuf, web_config: &WaniWebConfig, term: &Term) -> Result<(), WaniError> {
-    fn get_audio_path(audio: &PronunciationAudio, audio_cache: &PathBuf, id: i32) -> Option<PathBuf> {
+async fn try_download_file(url: &str, web_config: &WaniWebConfig, path: &PathBuf) -> Result<(), WaniError> {
+    let request = web_config.client
+        .get(url)
+        .bearer_auth(&web_config.auth);
+
+    match request.send().await {
+        Err(_) => {
+            Err(WaniError::Generic(format!("Error fetching file from url: {}", url)))
+        },
+        Ok(request) => {
+            if request.status() != reqwest::StatusCode::OK {
+                Err(WaniError::Generic(format!("Error fetching file. HTTP {}", request.status())))
+            }
+            else {
+                if let Ok(mut f) = tokio::fs::File::create(&path).await {
+                    let body = request.text().await?;
+                    let body = body.replace("var(--color-text, #000)", "rgb(0,0,0)");
+                    //let body = body.replace("#000", "rgb(0,0,0)");
+                    println!("{}", body);
+                    let _ = tokio::io::copy(&mut body.as_bytes(), &mut f).await?;
+                    Ok(())
+                }
+                else {
+                    Err(WaniError::Generic("Error opening file to save downloaded content.".into()))
+                }
+            }
+        },
+    }
+}
+
+async fn get_radical_image(radical: &wanidata::Radical, image_cache: &PathBuf, target_width: u32, web_config: &WaniWebConfig) -> Result<io::Lines<io::BufReader<File>>, WaniError> {
+    fn try_convert_image_png(path: &PathBuf, output_path: &PathBuf) -> Result<(), WaniError> {
+        let svg = fs::read_to_string(path)?;
+        let options = usvg::Options::default();
+        let mut tree = Tree::from_str(&svg, &options)?; 
+        usvg::TreePostProc::postprocess(&mut tree, PostProcessingSteps::default(), &usvg::fontdb::Database::new());
+        let size = tree.size.to_int_size();
+        let pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height());
+        match pixmap {
+            Some(mut pixmap) => {
+                let _ = resvg::render(&tree, usvg::Transform::from_scale(1.0, 1.0), &mut pixmap.as_mut());
+                for pixel in pixmap.data_mut().as_rgba_mut() {
+                    if pixel.a == 0 {
+                        pixel.r = 255;
+                        pixel.g = 255;
+                        pixel.b = 255;
+                    }
+                }
+
+                if let Err(e) = pixmap.save_png(output_path) {
+                    return Err(WaniError::Generic(format!("{}", e)));
+                }
+                Ok(())
+            },
+            None => {
+                Err(WaniError::Generic("Could not save to png".to_owned()))
+            }
+        }
+    }
+
+    fn try_asciify_image(path: &PathBuf, target_width: u32, text_path: &PathBuf) -> Result<(), WaniError> {
+        if let Some(p) = path.to_str() {
+            let res = image2ascii(p, target_width, Some(50.0), None);
+            match res {
+                Ok(a) => {
+                    let mut file = fs::File::create(text_path)?;
+                    for line in a.to_lines() {
+                        writeln!(file, "{}", line)?;
+                    }
+                    Ok(())
+                },
+                Err(e) => {
+                    Err(WaniError::Generic(format!("{}", e)))
+                }
+            }
+        }
+        else {
+            Err(WaniError::Generic("Couldn't convert path to string".into()))
+        }
+    }
+
+    if let Some(image_path) = image_cache.to_str() {
+        if let Ok(entries) = glob::glob(&format!("{}/{}_*.txt", image_path, radical.id))
+        {
+            for entry in entries {
+                if let Ok(path) = entry {
+                    let txt_path = path.to_str();
+                    if let Some(txt_path) = txt_path {
+                        return Ok(read_lines(&txt_path)?)
+                    }
+                }
+            }
+        }
+    }
+
+    let image_names = radical.data.character_images.iter()
+        .enumerate()
+        .map(|(i, _)| format!("{}_{}", radical.id, i))
+        .collect::<Vec<_>>();
+
+    let svg_paths = image_names.iter()
+        .enumerate()
+        .map(|(_, name)| {
+            let mut path = image_cache.clone();
+            path.push(format!("{}{}", name, ".svg"));
+            path
+        })
+    .collect::<Vec<_>>();
+
+    let png_paths = image_names.iter()
+        .enumerate()
+        .map(|(_, name)| {
+            let mut path = image_cache.clone();
+            path.push(format!("{}{}", name, ".png"));
+            path
+        })
+    .collect::<Vec<_>>();
+
+    let txt_paths = image_names.iter()
+        .enumerate()
+        .map(|(_, name)| {
+            let mut path = image_cache.clone();
+            path.push(format!("{}{}", name, ".txt"));
+            path
+        })
+    .collect::<Vec<_>>();
+
+    for i in 0..png_paths.len() {
+        let res = try_asciify_image(&png_paths[i], target_width, &txt_paths[i]);
+        if let Ok(_) = res {
+            return Ok(read_lines(&txt_paths[i])?)
+        }
+    }
+
+    for i in 0..svg_paths.len() {
+        let res = try_convert_image_png(&svg_paths[i], &png_paths[i]);
+        if let Ok(_) = res {
+            let res = try_asciify_image(&png_paths[i], target_width, &txt_paths[i]);
+            if let Ok(_) = res {
+                return Ok(read_lines(&txt_paths[i])?)
+            }
+        }
+
+        match &radical.data.character_images[i].content_type {
+            Some(ct) => {
+                if ct != "image/svg+xml" {
+                    continue;
+                }
+            }
+            None => continue,
+        }
+
+        let res = try_download_file(&radical.data.character_images[i].url, web_config, &svg_paths[i]).await;
+        if let Ok(_) = res {
+            let res = try_convert_image_png(&svg_paths[i], &png_paths[i]);
+            if let Ok(_) = res {
+                let res = try_asciify_image(&png_paths[i], target_width, &txt_paths[i]);
+                if let Ok(_) = res {
+                    return Ok(read_lines(&txt_paths[i])?)
+                }
+            }
+        }
+    }
+
+    Err(WaniError::Generic("Failed to convert any images.".into()))
+}
+
+async fn play_audio_for_subj(subject: &Subject, audio_cache: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
+    fn get_audio_path(audio: &PronunciationAudio, audio_cache: &PathBuf, id: i32, index: usize) -> Option<PathBuf> {
         let ext;
         const MPEG: &str = "audio/mpeg";
         const OGG: &str = "audio/ogg";
@@ -861,38 +1084,8 @@ async fn play_audio_for_subj(subject: &Subject, audio_cache: &PathBuf, web_confi
         let ext = ext.unwrap();
 
         let mut audio_path = audio_cache.clone();
-        audio_path.push(format!("{}_0{}", id, ext));
+        audio_path.push(format!("{}_{}{}", id, index, ext));
         Some(audio_path)
-    }
-
-    async fn try_download_audio(audio: &PronunciationAudio, audio_path: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
-        let request = web_config.client
-            .get(&audio.url);
-        match request.send().await {
-            Err(_) => {
-                Err(WaniError::Generic(format!("Error fetching audio from url: {}", audio.url)))
-            },
-            Ok(request) => {
-                if request.status() != reqwest::StatusCode::OK {
-                    Err(WaniError::Generic(format!("Error fetching audio. HTTP {}", request.status())))
-                }
-                else {
-                    if let Ok(f) = tokio::fs::File::create(&audio_path).await {
-                        let mut reader = tokio::io::BufWriter::new(f);
-                        let res = reader.write_all_buf(&mut request.bytes().await?).await;
-                        if let Err(e) = res {
-                            Err(WaniError::Generic(format!("Error downloading audio. {}", e)))
-                        }
-                        else {
-                            Ok(())
-                        }
-                    }
-                    else {
-                        Err(WaniError::Generic("Error opening file to save audio".into()))
-                    }
-                }
-            },
-        }
     }
 
     let (id, audios) = match subject {
@@ -907,7 +1100,8 @@ async fn play_audio_for_subj(subject: &Subject, audio_cache: &PathBuf, web_confi
 
     let audios = audios.unwrap();
     let audio_paths = audios.iter()
-        .map(|a| get_audio_path(a, audio_cache, id))
+        .enumerate()
+        .map(|(i, a)| get_audio_path(a, audio_cache, id, i))
         .collect::<Vec<_>>();
 
     for i in 0..audio_paths.len() {
@@ -921,7 +1115,7 @@ async fn play_audio_for_subj(subject: &Subject, audio_cache: &PathBuf, web_confi
 
     for i in 0..audios.len() {
         if let Some(path) = &audio_paths[i] {
-            let res = try_download_audio(&audios[i], &path, web_config).await;
+            let res = try_download_file(&audios[i].url, web_config, &path).await;
             if let Ok(_) = res {
                 let play_res = play_audio(&path);
                 if let Ok(_) = play_res {
@@ -1245,6 +1439,8 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
                                         Ok(_) => {},
                                     }
                                 }
+
+                                tx.commit()?;
 
                                 Ok(SyncResult {
                                     success_count: rad_len + kanji_len + vocab_len + kana_vocab_len - parse_fails,
