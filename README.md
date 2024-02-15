@@ -1,6 +1,6 @@
 # Wani
 
-## A familiar WaniKani experience. . . in the terminal
+## A familiar WaniKani experience in the terminal
 
 - Do your WaniKani reviews from the command line.
 - Work offline, syncing reviews with the WaniKani servers later.
