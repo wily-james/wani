@@ -294,6 +294,15 @@ pub struct Radical {
     pub data: RadicalData,
 }
 
+impl Radical {
+    pub fn primary_meanings<'a>(&'a self) -> impl Iterator<Item=&'a String> {
+        self.data.meanings.iter()
+            .filter(|m| m.primary && m.accepted_answer)
+            .map(|m| &m.meaning)
+    }
+
+}
+
 #[derive(Deserialize, Debug)]
 pub struct RadicalData {
     // Subject Common
@@ -328,6 +337,32 @@ pub struct Kanji {
     pub id: i32,
 
     pub data: KanjiData,
+}
+
+impl Kanji {
+    pub fn primary_meanings<'a>(&'a self) -> impl Iterator<Item=&'a String> {
+        self.data.meanings.iter()
+            .filter(|m| m.primary && m.accepted_answer)
+            .map(|m| &m.meaning)
+    }
+
+    pub fn primary_readings<'a>(&'a self) -> impl Iterator<Item=&'a String> {
+        self.data.readings.iter()
+            .filter(|m| m.primary && m.accepted_answer)
+            .map(|m| &m.reading)
+    }
+
+    pub fn alt_meanings<'a>(&'a self) -> impl Iterator<Item = &'a String> {
+        self.data.meanings.iter()
+            .filter(|m| !m.primary && m.accepted_answer)
+            .map(|m| &m.meaning)
+    }
+
+    pub fn alt_readings<'a>(&'a self) -> impl Iterator<Item = &'a String> {
+        self.data.readings.iter()
+            .filter(|m| !m.primary && m.accepted_answer)
+            .map(|m| &m.reading)
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -388,6 +423,32 @@ pub struct Vocab
     pub id: i32,
 
     pub data: VocabData
+}
+
+impl Vocab {
+    pub fn primary_meanings<'a>(&'a self) -> impl Iterator<Item=&'a String> {
+        self.data.meanings.iter()
+            .filter(|m| m.primary && m.accepted_answer)
+            .map(|m| &m.meaning)
+    }
+
+    pub fn primary_readings<'a>(&'a self) -> impl Iterator<Item=&'a String> {
+        self.data.readings.iter()
+            .filter(|m| m.primary && m.accepted_answer)
+            .map(|m| &m.reading)
+    }
+
+    pub fn alt_meanings<'a>(&'a self) -> impl Iterator<Item = &'a String> {
+        self.data.meanings.iter()
+            .filter(|m| !m.primary && m.accepted_answer)
+            .map(|m| &m.meaning)
+    }
+
+    pub fn alt_readings<'a>(&'a self) -> impl Iterator<Item = &'a String> {
+        self.data.readings.iter()
+            .filter(|m| !m.primary && m.accepted_answer)
+            .map(|m| &m.reading)
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -481,6 +542,20 @@ pub struct KanaVocab {
     pub id: i32,
 
     pub data: KanaVocabData
+}
+
+impl KanaVocab {
+    pub fn primary_meanings<'a>(&'a self) -> impl Iterator<Item=&'a String> {
+        self.data.meanings.iter()
+            .filter(|m| m.primary && m.accepted_answer)
+            .map(|m| &m.meaning)
+    }
+
+    pub fn alt_meanings<'a>(&'a self) -> impl Iterator<Item = &'a String> {
+        self.data.meanings.iter()
+            .filter(|m| !m.primary && m.accepted_answer)
+            .map(|m| &m.meaning)
+    }
 }
 
 #[derive(Deserialize, Debug)]

@@ -415,7 +415,6 @@ async fn command_review(args: &Args) {
             Ok(())
         }).await?;
 
-        //let mut futures = vec![];
         let mut join_set = JoinSet::new();
         for (_, review) in reviews.deref() {
             if let ReviewStatus::Done = review.status {
@@ -439,7 +438,6 @@ async fn command_review(args: &Args) {
             }
         }
 
-        //for response in futures::future::join_all(futures).await {
         while let Some(response) = join_set.join_next().await {
             if let Ok(response) = response {
                 match response {
@@ -858,32 +856,108 @@ async fn command_review(args: &Args) {
                     if showing_info {
                         let lines = match subject {
                             Subject::Radical(r) => {
+                                let mut lines = vec![];
+                                let meanings = r.primary_meanings()
+                                    .join(", ");
+                                if meanings.len() > 0 {
+                                    lines.push(pad_str(&meanings, width, align, None).to_string());
+                                }
+                                else {
+                                    lines.push(pad_str("Radical name not found.", width, align, None).to_string())
+                                }
                                 let mnemonic = wanidata::format_wani_text(&r.data.meaning_mnemonic, &wfmt_args);
-                                split_str_by_len(&mnemonic, text_width)
+                                lines.push("---".to_owned());
+                                split_str_by_len(&mnemonic, text_width, &mut lines);
+                                lines
                             },
                             Subject::Kanji(k) => {
                                 if is_meaning {
+                                    let mut lines = vec![];
+                                    let meanings = k.primary_meanings()
+                                        .join(", ");
+                                    if meanings.len() > 0 {
+                                        lines.push(pad_str(&meanings, width, align, None).to_string());
+                                    }
+                                    let alt_meanings = k.alt_meanings()
+                                        .join(", ");
+                                    if alt_meanings.len() > 0 {
+                                        lines.push(pad_str(&alt_meanings, width, align, None).to_string());
+                                    }
+                                    lines.push("---".to_owned());
                                     let mnemonic = wanidata::format_wani_text(&k.data.meaning_mnemonic, &wfmt_args);
-                                    split_str_by_len(&mnemonic, text_width)
+                                    split_str_by_len(&mnemonic, text_width, &mut lines);
+                                    lines
                                 }
                                 else {
+                                    let mut lines = vec![];
+                                    let readings = k.primary_readings()
+                                        .join(", ");
+                                    if readings.len() > 0 {
+                                        lines.push(pad_str(&readings, width, align, None).to_string());
+                                    }
+                                    let alt_readings = k.alt_readings()
+                                        .join(", ");
+                                    if alt_readings.len() > 0 {
+                                        lines.push(pad_str(&alt_readings, width, align, None).to_string());
+                                    }
+                                    lines.push("---".to_owned());
                                     let mnemonic = wanidata::format_wani_text(&k.data.reading_mnemonic, &wfmt_args);
-                                    split_str_by_len(&mnemonic, text_width)
+                                    split_str_by_len(&mnemonic, text_width, &mut lines);
+                                    lines
                                 }
                             },
                             Subject::Vocab(v) => {
                                 if is_meaning {
+                                    let mut lines = vec![];
+                                    let meanings = v.primary_meanings()
+                                        .join(", ");
+                                    if meanings.len() > 0 {
+                                        lines.push(pad_str(&meanings, width, align, None).to_string());
+                                    }
+                                    let alt_meanings = v.alt_meanings()
+                                        .join(", ");
+                                    if alt_meanings.len() > 0 {
+                                        lines.push(pad_str(&alt_meanings, width, align, None).to_string());
+                                    }
+                                    lines.push("---".to_owned());
                                     let mnemonic = wanidata::format_wani_text(&v.data.meaning_mnemonic, &wfmt_args);
-                                    split_str_by_len(&mnemonic, text_width)
+                                    split_str_by_len(&mnemonic, text_width, &mut lines);
+                                    lines
                                 }
                                 else {
+                                    let mut lines = vec![];
+                                    let readings = v.primary_readings()
+                                        .join(", ");
+                                    if readings.len() > 0 {
+                                        lines.push(pad_str(&readings, width, align, None).to_string());
+                                    }
+                                    let alt_readings = v.alt_readings()
+                                        .join(", ");
+                                    if alt_readings.len() > 0 {
+                                        lines.push(pad_str(&alt_readings, width, align, None).to_string());
+                                    }
+                                    lines.push("---".to_owned());
                                     let mnemonic = wanidata::format_wani_text(&v.data.reading_mnemonic, &wfmt_args);
-                                    split_str_by_len(&mnemonic, text_width)
+                                    split_str_by_len(&mnemonic, text_width, &mut lines);
+                                    lines
                                 }
                             },
                             Subject::KanaVocab(kv) => {
+                                let mut lines = vec![];
+                                let meanings = kv.primary_meanings()
+                                    .join(", ");
+                                if meanings.len() > 0 {
+                                    lines.push(pad_str(&meanings, width, align, None).to_string());
+                                }
+                                let alt_meanings = kv.alt_meanings()
+                                    .join(", ");
+                                if alt_meanings.len() > 0 {
+                                    lines.push(pad_str(&alt_meanings, width, align, None).to_string());
+                                }
+                                lines.push("---".to_owned());
                                 let mnemonic = wanidata::format_wani_text(&kv.data.meaning_mnemonic, &wfmt_args);
-                                split_str_by_len(&mnemonic, text_width)
+                                    split_str_by_len(&mnemonic, text_width, &mut lines);
+                                    lines
                             },
                         };
                         for line in &lines {
@@ -1107,7 +1181,7 @@ async fn command_review(args: &Args) {
             }
 
             let _ = ctrlc::set_handler(move || {
-                println!("received Ctrl+C!");
+                println!("\nreceived Ctrl+C!\nSaving reviews...");
             });
 
             let res = do_reviews(&mut assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit).await;
@@ -1377,8 +1451,7 @@ async fn play_audio_for_subj(id: i32, audios: Vec<PronunciationAudio>, audio_cac
     return Ok(());
 }
 
-fn split_str_by_len(s: &str, l: usize) -> Vec<String> {
-    let mut v = vec![];
+fn split_str_by_len(s: &str, l: usize, v: &mut Vec<String>)  {
     let mut curr = vec![];
     let mut curr_len = 0;
 
@@ -1397,8 +1470,6 @@ fn split_str_by_len(s: &str, l: usize) -> Vec<String> {
     if curr_len > 0 {
         v.push(curr.join(" ").to_string());
     }
-
-    v
 }
 
 async fn select_data<T, F, P>(sql: &'static str, c: &AsyncConnection, parse_fn: F, params: P) -> Result<Vec<T>, tokio_rusqlite::Error> 
