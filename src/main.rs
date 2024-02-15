@@ -4,7 +4,8 @@ mod wanisql;
 use crate::wanidata::{Assignment, NewReview, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::io::Write;
+use std::error::Error;
+use std::io::{BufReader, Read, Write};
 use std::ops::Deref;
 use std::sync::PoisonError;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
@@ -17,11 +18,14 @@ use rand::{thread_rng, Rng};
 use reqwest::{
     Response, Client, StatusCode
 };
+use rodio::decoder::LoopedDecoder;
+use rodio::{Decoder, OutputStream, Sink, Source};
 use rusqlite::params;
 use rusqlite::{
     Connection, Error as SqlError
 };
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use tokio::join;
 use tokio_rusqlite::Connection as AsyncConnection;
 use console:: {
@@ -99,6 +103,8 @@ enum WaniError {
     Poison,
     JoinError(#[from] tokio::task::JoinError),
     Io(#[from] std::io::Error),
+    //Audio,
+    Reqwest(#[from] reqwest::Error),
 }
 
 impl<T> From<PoisonError<T>> for WaniError {
@@ -118,6 +124,8 @@ impl Display for WaniError {
             WaniError::Poison => f.write_str("Error: Mutex poisoned."),
             WaniError::JoinError(e) => e.fmt(f),
             WaniError::Io(e) => e.fmt(f),
+            //WaniError::Audio => f.write_str("Audio Playback Error."),
+            WaniError::Reqwest(e) => e.fmt(f),
         }
     }
 }
@@ -260,32 +268,31 @@ fn command_query_radicals(args: &Args) {
     };
 }
 
-fn play_audio(subject: &Subject, audio_cache: &PathBuf) {
-    let audio = match subject {
-        Subject::Radical(r) => (r.id, None),
-        Subject::Kanji(k) => (k.id, None),
-        Subject::Vocab(d) => (d.id, d.data.pronunciation_audios.first()),
-        Subject::KanaVocab(d) => (d.id, d.data.pronunciation_audios.first()),
-    };
+fn play_audio(audio_path: PathBuf) -> Result<(), WaniError> {
+    match OutputStream::try_default() {
+        Ok(t) => {
+            let file_res = File::open(&audio_path);
+            if let Err(_) = file_res {
+                return Err(WaniError::Generic(format!("Could not open audio file: {}", audio_path.display())));
+            }
 
-    if let Some(a) = audio.1 {
-        let ext;
-        const MPEG: &str = "audio/mpeg";
-        const OGG: &str = "audio/ogg";
-        if a.content_type == MPEG {
-            ext = Some(".mpeg");
-        }
-        else if a.content_type == OGG {
-            ext = Some(".ogg");
-        }
-        else {
-            ext = None;
-        }
+            let sink = Sink::try_new(&t.1).expect("Sink broke");
+            let source = Decoder::new(BufReader::new(file_res.unwrap()));
+            match source {
+                Ok(s) => {
+                    sink.append(s);
+                    sink.sleep_until_end(); // TODO - move this to another thread to avoid blocking
+                                            // related: https://github.com/RustAudio/rodio/issues/381
+                    return Ok(())
+                },
+                Err(e) => {
+                    return Err(WaniError::Generic(format!("Error creating decoder. Error: {}", e)));
+                }
+            }
 
-        let id = audio.0;
-        let mut audio_path = audio_cache.clone();
-        if let Some(ext) = ext {
-            audio_path.push(format!("{}_0.{}", id, ext));
+        },
+        Err(e) => {
+            return Err(WaniError::Generic(format!("Error opening default output stream. {}", e)));
         }
     }
 }
@@ -308,7 +315,7 @@ async fn command_review(args: &Args) {
         Ok(())
     }
 
-    fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf) -> Result<(), WaniError> {
+    async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
             let term = Term::buffered_stdout();
             let rng = &mut thread_rng();
             let width = 80;
@@ -378,6 +385,7 @@ async fn command_review(args: &Args) {
             while !batch.is_empty() {
                 batch.shuffle(rng);
                 let assignment = batch.last().unwrap();
+                let subj_id = assignment.data.subject_id;
                 let review = reviews.get_mut(&assignment.id).unwrap();
                 let subject = subjects.get(&assignment.data.subject_id);
                 if let None = subject {
@@ -540,7 +548,68 @@ async fn command_review(args: &Args) {
                                         showing_info = !showing_info;
                                     },
                                     'j' | 'J' => {
-                                        play_audio(subject, audio_cache);
+                                        let audio = match subject {
+                                            Subject::Radical(r) => (r.id, None),
+                                            Subject::Kanji(k) => (k.id, None),
+                                            Subject::Vocab(d) => (d.id, d.data.pronunciation_audios.iter().find_or_last(|a| a.content_type != "audio/mpeg")),
+                                            Subject::KanaVocab(d) => (d.id, d.data.pronunciation_audios.iter().find_or_last(|a| a.content_type != "audio/mpeg")),
+                                        };
+
+                                        if let Some(a) = audio.1 {
+                                            let ext;
+                                            const MPEG: &str = "audio/mpeg";
+                                            const OGG: &str = "audio/ogg";
+                                            const WEBM: &str = "audio/webm";
+                                            if a.content_type == MPEG {
+                                                ext = Some(".mpeg");
+                                            }
+                                            else if a.content_type == OGG {
+                                                ext = Some(".ogg");
+                                            }
+                                            else if a.content_type == WEBM {
+                                                ext = Some(".webm");
+                                            }
+                                            else {
+                                                ext = None;
+                                            }
+
+                                            if let Some(ext) = ext {
+                                                let id = audio.0;
+                                                let mut audio_path = audio_cache.clone();
+                                                audio_path.push(format!("{}_0{}", id, ext));
+
+                                                if let Err(_) = File::open(&audio_path) {
+                                                    let request = web_config.client
+                                                        .get(&a.url);
+                                                    match request.send().await {
+                                                        Err(_) => {
+                                                            println!("Error fetching audio from url: {}", a.url);
+                                                        },
+                                                        Ok(request) => {
+                                                            if request.status() != reqwest::StatusCode::OK {
+                                                                println!("Error fetching audio. HTTP {}", request.status());
+                                                            }
+                                                            else {
+                                                                if let Ok(f) = tokio::fs::File::create(&audio_path).await {
+                                                                    let mut reader = tokio::io::BufWriter::new(f);
+                                                                    let res = reader.write_all_buf(&mut request.bytes().await?).await;
+                                                                    if let Err(e) = res {
+                                                                        println!("Error downloading audio. {}", e);
+                                                                        term.read_key()?;
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                    }
+                                                }
+
+                                                let res = play_audio(audio_path);
+                                                if let Err(e) = res {
+                                                    println!("Error playing audio for id: {}. Error: {}", subj_id, e);
+                                                    term.read_key()?;
+                                                }
+                                            }
+                                        }
                                     },
                                     _ => {},
                                 }
@@ -599,8 +668,18 @@ async fn command_review(args: &Args) {
             Ok(())
     }
 
-    //let web_config = get_web_config(&args);
-    let conn = setup_async_connection(&args).await;
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+    }
+    let p_config = p_config.unwrap();
+    let web_config = get_web_config(&p_config);
+    if let Err(e) = web_config {
+        println!("{}", e);
+        return;
+    }
+    let web_config = web_config.unwrap();
+    let conn = setup_async_connection(args).await;
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -768,7 +847,7 @@ async fn command_review(args: &Args) {
                 return;
             }
 
-            let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap());
+            let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config).await;
         },
     };
 }
@@ -1343,6 +1422,7 @@ fn test_handle_wani_resp(w: WaniResp) -> () {
 
 fn get_audio_path(args: &Args) -> Result<PathBuf, WaniError> {
     let mut db_path = get_db_path(args)?;
+    db_path.pop();
     db_path.push("audio");
     
     if !Path::exists(&db_path)

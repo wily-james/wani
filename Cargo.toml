@@ -14,8 +14,9 @@ clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0", features = [] }
 home = "0"
 thiserror = "1.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs"] }
 tokio-rusqlite = "0.5.0"
 console = "0.15.8"
 rand = "0.8.5"
 itertools = "0.12.1"
+rodio = { version = "0.16.0", features = ["symphonia-all", "default"] }
