@@ -11,7 +11,7 @@ use wana_kana::{IsJapaneseChar, IsJapaneseStr};
 #[derive(Debug, Deserialize)]
 pub struct WaniResp {
     pub url: String,
-    pub data_updated_at: Option<String>, // TODO - optional for collections if no elements, mandatory
+    pub data_updated_at: Option<String>,
     #[serde(flatten)]
     pub data: WaniData,
     pub resources_updated: Option<ResourcesUpdated>,

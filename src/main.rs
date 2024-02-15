@@ -1,7 +1,7 @@
 mod wanidata;
 mod wanisql;
 
-use crate::wanidata::{Assignment, NewReview, PronunciationAudio, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
+use crate::wanidata::{Assignment, NewReview, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
@@ -186,19 +186,24 @@ struct SyncResult {
     fail_count: usize,
 }
 
+struct AudioInfo {
+    url: String,
+    content_type: String,
+}
+
 struct AudioMessage {
     send_time: std::time::Instant,
     id: i32,
-    audios: Vec<wanidata::PronunciationAudio>, // TODO - we can trim the fat off this message
+    audios: Vec<AudioInfo>,
 }
 
 type RateLimitBox = Arc<Mutex<Option<RateLimit>>>;
 
 // TODO - only pub to silence warning
 #[derive(Default)]
-pub struct CacheInfo {
+struct CacheInfo {
     id: usize,
-    pub etag: Option<String>,
+    etag: Option<String>,
     last_modified: Option<String>,
     updated_after: Option<String>,
 }
@@ -523,7 +528,6 @@ fn print_lesson_screen(term: &Term, char_line: &[String], meaning_line: &Option<
     Ok(())
 }
 
-// TODO - fix these statistics wrt multiple batches
 fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, width: usize, align: console::Alignment, char_lines: &Vec<String>, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
     term.clear_screen()?;
 
@@ -938,7 +942,6 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
             batch.push(assignments.remove(i));
         }
 
-        // TODO - do lesson batch
         let _ = do_lesson_batch(batch, &mut rev_type, &subjects_by_id, image_cache, web_config, c, &audio_tx, p_config, rate_limit).await;
     }
 
@@ -1050,7 +1053,12 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
                                 let _ = audio_tx.send(AudioMessage {
                                     send_time: std::time::Instant::now(),
                                     id,
-                                    audios,
+                                    audios: audios.iter()
+                                        .map(|a| AudioInfo {
+                                            url: a.url.clone(),
+                                            content_type: a.content_type.clone(),
+                                        }).collect_vec(),
+
                                 }).await;
                             }
                         },
@@ -1375,7 +1383,10 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                                         let _ = audio_tx.send(AudioMessage {
                                             send_time: std::time::Instant::now(),
                                             id,
-                                            audios,
+                                            audios: audios.iter().map(|a| AudioInfo {
+                                                url: a.url.clone(),
+                                                content_type: a.content_type.clone(),
+                                            }).collect_vec(),
                                         }).await;
                                     }
                                 }
@@ -2551,8 +2562,8 @@ async fn get_radical_image(radical: &wanidata::Radical, image_cache: &PathBuf, t
     Err(WaniError::Generic("Failed to convert any images.".into()))
 }
 
-async fn play_audio_for_subj(id: i32, audios: Vec<PronunciationAudio>, audio_cache: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
-    fn get_audio_path(audio: &PronunciationAudio, audio_cache: &PathBuf, id: i32, index: usize) -> Option<PathBuf> {
+async fn play_audio_for_subj(id: i32, audios: Vec<AudioInfo>, audio_cache: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
+    fn get_audio_path(audio: &AudioInfo, audio_cache: &PathBuf, id: i32, index: usize) -> Option<PathBuf> {
         let ext;
         const MPEG: &str = "audio/mpeg";
         const OGG: &str = "audio/ogg";
