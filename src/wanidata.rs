@@ -356,26 +356,3 @@ pub enum AuxMeaningType
     #[serde(rename="blacklist")]
     Blacklist
 }
-
-#[derive(Deserialize, Debug)]
-pub enum CacheInfoType
-{
-    Resources = 0,
-}
-
-pub enum CacheInfoSchema
-{
-    Type,
-    Etag,
-    LastModified,
-}
-
-impl Into<usize> for CacheInfoSchema {
-    fn into(self) -> usize {
-        match self {
-            CacheInfoSchema::Type => 0,
-            CacheInfoSchema::Etag => 1,
-            CacheInfoSchema::LastModified => 2,
-        }
-    }
-}

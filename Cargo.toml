@@ -13,3 +13,4 @@ chrono = { version = "0", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 rusqlite = "0"
 home = "0"
+thiserror = "1.0"

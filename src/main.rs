@@ -1,18 +1,18 @@
 mod wanidata;
 
 use crate::wanidata::{
-    AuxMeaning, CacheInfoSchema, CacheInfoType, WaniData, WaniResp
+    AuxMeaning, WaniData, WaniResp
 };
-use std::{fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
+use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use clap::{Parser, Subcommand};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use reqwest::{
-    blocking::Client, header::HeaderMap, Response, StatusCode
-    //Error,
+    blocking::Client, StatusCode
 };
 use rusqlite::{
     Connection, Error as SqlError, Statement
 };
+use thiserror::Error;
 
 #[derive(Parser)]
 struct Args {
@@ -43,23 +43,46 @@ enum Command {
     S,
     /// Does first-time initialization
     Init,
-    TestSubject,
     /// Syncs local data with WaniKani servers
     Sync,
     /// Forces update of local data instead of only fetching new data
     ForceSync,
+
+    // Debug/Testing commands:
     /// Check the cache info in db
     CacheInfo,
     QueryRadicals,
+    TestSubject,
 }
 
+/// Info saved to program config file
 struct ProgramConfig {
     auth: Option<String>,
 }
 
-#[derive(Debug)]
-struct Error {
-    msg: String
+/// Info needed to make WaniKani web requests
+struct WaniWebConfig {
+    auth: String
+}
+
+
+#[derive(Error, Debug)]
+enum WaniError {
+    Generic(String),
+    Parse(#[from] serde_json::Error),
+    Sql(#[from] SqlError),
+    Chrono(#[from] chrono::ParseError),
+}
+
+impl Display for WaniError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaniError::Generic(g) => f.write_str(g),
+            WaniError::Parse(e) => e.fmt(f),
+            WaniError::Sql(e) => e.fmt(f),
+            WaniError::Chrono(e) => e.fmt(f),
+        }
+    }
 }
 
 fn main() {
@@ -68,64 +91,27 @@ fn main() {
     match &args.command {
         Some(c) => {
             match c {
-                Command::Summary => wani_summary(&args),
-                Command::S => wani_summary(&args),
-                Command::Init => wani_init(&args),
-                Command::TestSubject => wani_test_subject(&args),
-                Command::Sync => wani_sync(&args, false),
-                Command::ForceSync => wani_sync(&args, true),
-                Command::CacheInfo => check_cache_info(&args),
-                Command::QueryRadicals => wani_radicals(&args),
+                Command::Summary => command_summary(&args),
+                Command::S => command_summary(&args),
+                Command::Init => command_init(&args),
+                Command::Sync => command_sync(&args, false),
+                Command::ForceSync => command_sync(&args, true),
+
+                // Testing
+                Command::CacheInfo => command_cache_info(&args),
+                Command::QueryRadicals => command_query_radicals(&args),
+                Command::TestSubject => command_test_subject(&args),
             }
         },
-        None => wani_summary(&args),
+        None => command_summary(&args),
     }
 
 }
 
-fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
-where P: AsRef<Path>, {
-    let file = File::open(filename)?;
-    Ok(io::BufReader::new(file).lines())
-}
-
-fn setup_connection(args: &Args) -> Result<Connection, Error> {
-    let mut datapath = PathBuf::new();
-    if let Some(dpath) = &args.datapath {
-        datapath.push(dpath);
-    }
-    else {
-        match home::home_dir() {
-            Some(h) => {
-                datapath.push(h);
-                datapath.push(".wani");
-            },
-            None => {
-                return Err(Error { msg: "Could not find home directory. Please manually specify datapath arg. Use \"wani -help\" for more details.".into() });
-            }
-        }
-    }
-    
-    if !Path::exists(&datapath)
-    {
-        if let Err(s) = fs::create_dir(&datapath) {
-            return Err(Error { msg: format!("Could not create datapath at {}\nError: {}", datapath.display(), s) });
-        }
-    }
-
-    let mut db_path = PathBuf::from(&datapath);
-    db_path.push("wani_cache.db");
-
-    match Connection::open(&db_path) {
-        Err(e) => Err(Error { msg: format!("{}", e) }),
-        Ok(c) => Ok(c),
-    }
-}
-
-fn wani_radicals(args: &Args) {
+fn command_query_radicals(args: &Args) {
     let conn = setup_connection(&args);
     match conn {
-        Err(e) => println!("{}", e.msg),
+        Err(e) => println!("{}", e),
         Ok(c) => {
             let mut stmt = c.prepare("select 
                                      id,
@@ -143,10 +129,11 @@ fn wani_radicals(args: &Args) {
                                       characters,
                                       character_images from radicals;").unwrap();
 
-            match stmt.query_map([], |r| parse_radical(r))
-            {
+            match stmt.query_map([], |r| parse_radical(r)
+                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
                 Ok(radicals) => {
-                    for _ in radicals {
+                    for r in radicals {
+                        println!("{:?}", r)
                     }
                 },
                 Err(_) => {},
@@ -155,10 +142,10 @@ fn wani_radicals(args: &Args) {
     };
 }
 
-fn check_cache_info(args: &Args) {
+fn command_cache_info(args: &Args) {
     let conn = setup_connection(&args);
     match conn {
-        Err(e) => println!("{}", e.msg),
+        Err(e) => println!("{}", e),
         Ok(c) => {
             match c.query_row("select * from cache_info where id = 0", [], 
                         |r| Ok((r.get::<usize, i32>(0)?, r.get::<usize, Option<String>>(1)?, r.get::<usize, Option<String>>(2)?, r.get::<usize, Option<String>>(3)?))) {
@@ -178,53 +165,11 @@ fn check_cache_info(args: &Args) {
     };
 }
 
-fn store_radical(r: wanidata::Radical, stmt: &mut Statement<'_>) -> Result<usize, SqlError>
-{
-    let p = rusqlite::params!(
-        format!("{}", r.id),
-        serde_json::to_string(&r.data.aux_meanings).unwrap(),
-        r.data.created_at.to_rfc3339(),
-        r.data.document_url,
-        if let Some(hidden_at) = r.data.hidden_at { hidden_at.to_rfc3339() } else { "null".into() },
-        format!("{}", r.data.lesson_position),
-        format!("{}", r.data.level),
-        r.data.meaning_mnemonic,
-        serde_json::to_string(&r.data.meanings).unwrap(),
-        r.data.slug,
-        format!("{}", r.data.spaced_repetition_system_id),
-        serde_json::to_string(&r.data.amalgamation_subject_ids).unwrap(),
-        if let Some(chars) = r.data.characters { chars } else { "null".into() },
-        serde_json::to_string(&r.data.character_images).unwrap(),
-        );
-    return stmt.execute(p);
-}
-
-fn parse_radical(r: &rusqlite::Row<'_>) -> Result<wanidata::Radical, Error> {
-    println!("{}, {}", r.get::<usize, i32>(0).unwrap(), r.get::<usize, String>(1).unwrap());
-    return Ok(wanidata::Radical {
-        id: r.get::<usize, i32>(0)?,
-        data: wanidata::RadicalData { 
-            aux_meanings: serde_json::from_str::<Vec<AuxMeaning>>(&r.get::<usize, String>(1)?)?,
-            created_at: (), 
-            document_url: (), 
-            hidden_at: (), 
-            lesson_position: (), 
-            level: (), 
-            meaning_mnemonic: (), 
-            meanings: (), 
-            slug: (), 
-            spaced_repetition_system_id: (), 
-            amalgamation_subject_ids: (), 
-            characters: (), 
-            character_images: () }
-    });
-}
-
-fn wani_sync(args: &Args, ignore_cache: bool) {
+fn command_sync(args: &Args, ignore_cache: bool) {
     fn sync(args: &Args, conn: &Connection, ignore_cache: bool) {
         let web_config = get_web_config(&args);
         if let Err(e) = web_config {
-            println!("{}", e.msg);
+            println!("{}", e);
             return;
         }
 
@@ -366,7 +311,7 @@ fn wani_sync(args: &Args, ignore_cache: bool) {
 
     let conn = setup_connection(&args);
     match conn {
-        Err(e) => println!("{}", e.msg),
+        Err(e) => println!("{}", e),
         Ok(c) => {
             sync(&args, &c, ignore_cache);
             c.close().unwrap();
@@ -374,10 +319,10 @@ fn wani_sync(args: &Args, ignore_cache: bool) {
     };
 }
 
-fn wani_init(args: &Args) {
+fn command_init(args: &Args) {
     let conn = setup_connection(&args);
     match conn {
-        Err(e) => println!("{}", e.msg),
+        Err(e) => println!("{}", e),
         Ok(c) => {
             match setup_db(c) {
                 Ok(_) => {},
@@ -496,10 +441,59 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
     }
 }
 
-fn wani_test_subject(args: &Args) {
+fn store_radical(r: wanidata::Radical, stmt: &mut Statement<'_>) -> Result<usize, SqlError>
+{
+    let p = rusqlite::params!(
+        format!("{}", r.id),
+        serde_json::to_string(&r.data.aux_meanings).unwrap(),
+        r.data.created_at.to_rfc3339(),
+        r.data.document_url,
+        if let Some(hidden_at) = r.data.hidden_at { Some(hidden_at.to_rfc3339()) } else { None },
+        format!("{}", r.data.lesson_position),
+        format!("{}", r.data.level),
+        r.data.meaning_mnemonic,
+        serde_json::to_string(&r.data.meanings).unwrap(),
+        r.data.slug,
+        format!("{}", r.data.spaced_repetition_system_id),
+        serde_json::to_string(&r.data.amalgamation_subject_ids).unwrap(),
+        if let Some(chars) = r.data.characters { Some(chars) } else { None },
+        serde_json::to_string(&r.data.character_images).unwrap(),
+        );
+    return stmt.execute(p);
+}
+
+fn parse_radical(r: &rusqlite::Row<'_>) -> Result<wanidata::Radical, WaniError> {
+    return Ok(wanidata::Radical {
+        id: r.get::<usize, i32>(0)?,
+        data: wanidata::RadicalData { 
+            aux_meanings: serde_json::from_str::<Vec<AuxMeaning>>(&r.get::<usize, String>(1)?)?,
+            created_at: DateTime::parse_from_rfc3339(&r.get::<usize, String>(2)?)?.with_timezone(&Utc),
+            document_url: r.get::<usize, String>(3)?, 
+            hidden_at: 
+                if let Some(t) = r.get::<usize, Option<String>>(4)? { 
+                    println!("Hidden at: {}", t);
+                    Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
+                } 
+                else { 
+                    None 
+                },
+                lesson_position: r.get::<usize, i32>(5)?, 
+                level: r.get::<usize, i32>(6)?, 
+                meaning_mnemonic: r.get::<usize, String>(7)?, 
+                meanings: serde_json::from_str::<Vec<wanidata::Meaning>>(&r.get::<usize, String>(8)?)?, 
+                slug: r.get::<usize, String>(9)?, 
+                spaced_repetition_system_id: r.get::<usize, i32>(10)?, 
+                amalgamation_subject_ids: serde_json::from_str::<Vec<i32>>(&r.get::<usize, String>(11)?)?, 
+                characters: r.get::<usize, Option<String>>(12)?, 
+                character_images: serde_json::from_str::<Vec<wanidata::RadicalImage>>(&r.get::<usize, String>(13)?)?, 
+        }
+    });
+}
+
+fn command_test_subject(args: &Args) {
     let web_config = get_web_config(&args);
     if let Err(e) = web_config {
-        println!("{}", e.msg);
+        println!("{}", e);
         return;
     }
 
@@ -513,7 +507,7 @@ fn wani_test_subject(args: &Args) {
         .send();
 
     match parse_response(response) {
-        Ok(t) => handle_wani_resp(t.0),
+        Ok(t) => test_handle_wani_resp(t.0),
         Err(s) => println!("{}", s),
     }
 }
@@ -555,11 +549,96 @@ fn parse_response(response: Result<reqwest::blocking::Response, reqwest::Error>)
     }
 }
 
-struct WaniWebConfig {
-    auth: String
+fn command_summary(args: &Args) {
+    let web_config = get_web_config(&args);
+    if let Err(e) = web_config {
+        println!("{}", e);
+        return;
+    }
+    let web_config = web_config.unwrap();
+    let client = Client::new();
+    let response = client
+        .get("https://api.wanikani.com/v2/summary")
+        .header("Wanikani-Revision", "20170710")
+        .bearer_auth(web_config.auth)
+        .send();
+
+    match parse_response(response) {
+        Ok(wr) => test_handle_wani_resp(wr.0),
+        Err(s) => println!("{}", s),
+    }
 }
 
-fn get_web_config(args: &Args) -> Result<WaniWebConfig, Error> {
+fn test_handle_wani_resp(w: WaniResp) -> () {
+    let now = Utc::now();
+    match w.data {
+        WaniData::Report(s) => {
+            let mut count = 0;
+            for lesson in s.data.lessons {
+                if lesson.available_at < now {
+                    count += lesson.subject_ids.len();
+                }
+            }
+
+            println!("Lessons: {:?}", count);
+
+            let mut count = 0;
+            for review in s.data.reviews {
+                if review.available_at < now {
+                    count += review.subject_ids.len();
+                }
+            }
+
+            println!("Reviews: {:?}", count);
+        },
+
+        WaniData::Collection(collection) => {
+            println!("Collection: ");
+            for data in collection.data {
+                println!("{:?}", data);
+            }
+        },
+
+        _ => {
+            println!("Unexpected response type");
+        }
+    }
+}
+
+fn setup_connection(args: &Args) -> Result<Connection, WaniError> {
+    let mut datapath = PathBuf::new();
+    if let Some(dpath) = &args.datapath {
+        datapath.push(dpath);
+    }
+    else {
+        match home::home_dir() {
+            Some(h) => {
+                datapath.push(h);
+                datapath.push(".wani");
+            },
+            None => {
+                return Err(WaniError::Generic("Could not find home directory. Please manually specify datapath arg. Use \"wani -help\" for more details.".into()));
+            }
+        }
+    }
+    
+    if !Path::exists(&datapath)
+    {
+        if let Err(s) = fs::create_dir(&datapath) {
+            return Err(WaniError::Generic(format!("Could not create datapath at {}\nError: {}", datapath.display(), s)));
+        }
+    }
+
+    let mut db_path = PathBuf::from(&datapath);
+    db_path.push("wani_cache.db");
+
+    match Connection::open(&db_path) {
+        Ok(c) => Ok(c),
+        Err(e) => Err(WaniError::Generic(format!("{}", e))),
+    }
+}
+
+fn get_web_config(args: &Args) -> Result<WaniWebConfig, WaniError> {
     let mut configpath = PathBuf::new();
     if let Some(path) = &args.configfile {
         configpath.push(path);
@@ -574,13 +653,13 @@ fn get_web_config(args: &Args) -> Result<WaniWebConfig, Error> {
                 if !Path::exists(&configpath)
                 {
                     if let Err(s) = fs::create_dir(&configpath) {
-                        return Err(Error { msg: format!("Could not create wani config folder at {}\nError: {}", configpath.display(), s) });
+                        return Err(WaniError::Generic(format!("Could not create wani config folder at {}\nError: {}", configpath.display(), s)));
                     }
                 }
                 configpath.push(".wani.conf");
             },
             None => {
-                return Err(Error { msg: format!("Could not find home directory. Please manually specify configpath arg. Use \"wani -help\" for more details.") });
+                return Err(WaniError::Generic(format!("Could not find home directory. Please manually specify configpath arg. Use \"wani -help\" for more details.")));
             }
         };
     }
@@ -615,64 +694,14 @@ fn get_web_config(args: &Args) -> Result<WaniWebConfig, Error> {
         auth = String::from(a);
     }
     else {
-        return Err(Error { msg: format!("Need to specify a wanikani access token") });
+        return Err(WaniError::Generic(format!("Need to specify a wanikani access token")));
     }
 
     return Ok(WaniWebConfig { auth });
 }
 
-fn wani_summary(args: &Args) {
-    let web_config = get_web_config(&args);
-    if let Err(e) = web_config {
-        println!("{}", e.msg);
-        return;
-    }
-    let web_config = web_config.unwrap();
-    let client = Client::new();
-    let response = client
-        .get("https://api.wanikani.com/v2/summary")
-        .header("Wanikani-Revision", "20170710")
-        .bearer_auth(web_config.auth)
-        .send();
-
-    match parse_response(response) {
-        Ok(wr) => handle_wani_resp(wr.0),
-        Err(s) => println!("{}", s),
-    }
-}
-
-fn handle_wani_resp(w: WaniResp) -> () {
-    let now = Utc::now();
-    match w.data {
-        WaniData::Report(s) => {
-            let mut count = 0;
-            for lesson in s.data.lessons {
-                if lesson.available_at < now {
-                    count += lesson.subject_ids.len();
-                }
-            }
-
-            println!("Lessons: {:?}", count);
-
-            let mut count = 0;
-            for review in s.data.reviews {
-                if review.available_at < now {
-                    count += review.subject_ids.len();
-                }
-            }
-
-            println!("Reviews: {:?}", count);
-        },
-
-        WaniData::Collection(collection) => {
-            println!("Collection: ");
-            for data in collection.data {
-                println!("{:?}", data);
-            }
-        },
-
-        _ => {
-            println!("Unexpected response type");
-        }
-    }
+fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
+where P: AsRef<Path>, {
+    let file = File::open(filename)?;
+    Ok(io::BufReader::new(file).lines())
 }
