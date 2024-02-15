@@ -726,6 +726,31 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
     Ok(())
 }
 
+fn show_lesson_help(term: &Term, width: usize, align: console::Alignment) {
+    let _ = term.clear_screen();
+    let _ = term.write_line(pad_str("Hotkeys", width, align, None).deref());
+    let _ = term.write_line(pad_str("?: Show hotkeys menu", width, align, None).deref());
+    let _ = term.write_line(pad_str("'n' and 'N' toggle through flashcard pages", width, align, None).deref());
+    let _ = term.write_line(pad_str("'a' and 'd' also toggle through flashcard pages", width, align, None).deref());
+    let _ = term.write_line(pad_str("arrow keys also toggle through flashcard pages", width, align, None).deref());
+    let _ = term.write_line(pad_str("j: play subject audio", width, align, None).deref());
+    let _ = term.write_line(pad_str("g: skip to next subject flashcard", width, align, None).deref());
+    let _ = term.write_line(pad_str("q: skip to quiz", width, align, None).deref());
+    let _ = term.flush();
+    let _ = term.read_key();
+}
+
+fn show_review_help(term: &Term, width: usize, align: console::Alignment) {
+    let _ = term.clear_screen();
+    let _ = term.write_line(pad_str("Hotkeys", width, align, None).deref());
+    let _ = term.write_line(pad_str("?: Show hotkeys menu", width, align, None).deref());
+    let _ = term.write_line(pad_str("j: play subject audio", width, align, None).deref());
+    let _ = term.write_line(pad_str("f: open/close subject information", width, align, None).deref());
+    let _ = term.write_line(pad_str("'n' and 'N' toggle through information pages", width, align, None).deref());
+    let _ = term.flush();
+    let _ = term.read_key();
+}
+
 async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewType, subjects: &HashMap<i32, Subject>, image_cache: &PathBuf, web_config: &WaniWebConfig, conn: &AsyncConnection, audio_tx: &Sender<AudioMessage>, p_config: &ProgramConfig, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
     if batch.len() == 0 {
         return Ok(());
@@ -799,6 +824,7 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
                 },
                 console::Key::Char(c) => {
                     match c {
+                        '?' => show_lesson_help(&term, width, align),
                         'q' | 'Q' => break 'flashcards,
                         'g' | 'G' => { 
                             index += 1;
@@ -960,7 +986,15 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                         input.pop();
                     },
                     console::Key::Char(c) => {
-                        input.push(c);
+                        if input.len() > 0 {
+                            input.push(c);
+                        }
+                        else {
+                            match c {
+                                '?' => show_review_help(&term, width, align),
+                                _ => input.push(c),
+                            }
+                        }
                     },
                     _ => {},
                 };
@@ -1094,6 +1128,9 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                     console::Key::Enter | console::Key::Backspace=> { break 'after_input; },
                     console::Key::Char(c) => {
                         match c {
+                            '?' => if !tuple.0 {
+                                show_review_help(&term, width, align)
+                            },
                             'f' | 'F' => {
                                 if !tuple.0 { // Don't show info if the user isn't finished
                                               // guessing

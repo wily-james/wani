@@ -16,6 +16,7 @@ This is an unofficial WaniKani client. Use at your own risk.
     - [Binaries](#binaries)
   - [RECOMMENDED SETUP](#recommended-setup)
   - [USE](#use)
+  - [HOTKEYS](#hotkeys)
   - [CONFIGURATION](#configuration)
 <!--toc:end-->
 
@@ -69,12 +70,18 @@ Do your reviews:
 ```
 wani r
 ```
+You can view the review or lesson help by typing '?' during a lesson or review session.  
 You can quit a review session at any time (with ctrl+c), and your progress will be saved locally and/or uploaded to WaniKani servers.  
 
 Do your lessons:
 ```
 wani l
 ```
+
+## HOTKEYS
+
+wani hotkeys are similar to those of the WaniKani web application.  
+View the help page during a review or lesson session by typing '?' (a question mark).
 
 ## CONFIGURATION
 
