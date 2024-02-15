@@ -237,6 +237,19 @@ pub struct KanjiReading {
     pub r#type: KanjiType,
 }
 
+pub fn is_reading_correct(readings: &Vec<KanjiReading>, guess: &str) -> bool {
+    for reading in readings {
+        if !reading.accepted_answer {
+            continue;
+        }
+
+        if guess == reading.reading.to_lowercase() {
+            return true;
+        }
+    }
+    return false;
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum KanjiType
 {
@@ -313,6 +326,15 @@ pub struct VocabReading {
     pub reading: String,
 }
 
+pub fn is_vocab_reading_correct(readings: &Vec<VocabReading>, guess: &str) -> bool {
+    for reading in readings {
+        if reading.accepted_answer && reading.reading == guess {
+            return true;
+        }
+    }
+    return false;
+}
+
 #[derive(Deserialize, Debug)]
 pub struct KanaVocab {
     // Resource Common
@@ -371,6 +393,19 @@ pub struct Meaning {
     pub meaning: String,
     pub primary: bool,
     pub accepted_answer: bool,
+}
+
+pub fn is_meaning_correct(meanings: &Vec<Meaning>, guess: &str) -> bool {
+    for meaning in meanings {
+        if !meaning.accepted_answer {
+            continue;
+        }
+
+        if guess == meaning.meaning.to_lowercase() {
+            return true;
+        }
+    }
+    return false;
 }
 
 #[derive(Serialize, Deserialize, Debug)]

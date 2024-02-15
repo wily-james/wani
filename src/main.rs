@@ -1,9 +1,10 @@
 mod wanidata;
 mod wanisql;
 
-use crate::wanidata::{Assignment, NewReview, Subject, SubjectType, WaniData, WaniResp};
+use crate::wanidata::{Assignment, NewReview, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::HashMap;
+use std::io::Write;
 use std::ops::Deref;
 use std::sync::PoisonError;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
@@ -23,7 +24,7 @@ use thiserror::Error;
 use tokio::join;
 use tokio_rusqlite::Connection as AsyncConnection;
 use console:: {
-    pad_str, Emoji, Term
+    pad_str, style, Emoji, Term
 };
 
 #[derive(Parser)]
@@ -258,6 +259,19 @@ fn command_query_radicals(args: &Args) {
 }
 
 async fn command_review(args: &Args) {
+    fn print_review_screen(term: &Term, done: usize, failed: usize, total_reviews: usize, width: usize, align: console::Alignment, char_line: &str, review_type_text: &str) -> Result<(), WaniError> {
+        term.clear_screen()?;
+        let correct_percentage = if done == 0 { 100 } else { (done - failed) / done * 100 };
+        term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", 
+                                         Emoji("\u{1F44D}", "Correct"), correct_percentage, 
+                                         Emoji("\u{2705}", "Done"), done, 
+                                         Emoji("\u{1F4E9}", "Remaining"), total_reviews - done), 
+                                width, align, None).deref())?;
+        term.write_line(&char_line)?;
+        term.write_line(pad_str(&format!("{}:", review_type_text), width, align, None).deref())?;
+        Ok(())
+    }
+
     fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>) -> Result<(), WaniError> {
             let term = Term::buffered_stdout();
             let rng = &mut thread_rng();
@@ -266,6 +280,8 @@ async fn command_review(args: &Args) {
 
             assignments.reverse();
             let total_reviews = assignments.len();
+            let mut done = 0;
+            let mut failed = 0;
             let batch_size = min(50, assignments.len());
             let mut batch = Vec::with_capacity(batch_size);
             for i in (assignments.len() - batch_size..assignments.len()).rev() {
@@ -285,9 +301,9 @@ async fn command_review(args: &Args) {
             }
 
             while !batch.is_empty() {
-                batch.shuffle(rng);
+                //batch.shuffle(rng);
                 let assignment = batch.last().unwrap();
-                let review = reviews.get(&assignment.id).unwrap();
+                let review = reviews.get_mut(&assignment.id).unwrap();
                 let subject = subjects.get(&assignment.data.subject_id);
                 if let None = subject {
                     term.write_line(&format!("Did not find subject with id: {}", assignment.data.subject_id))?;
@@ -328,34 +344,104 @@ async fn command_review(args: &Args) {
                     Subject::KanaVocab(_) => "Vocab Meaning",
                 };
 
-                // Print status line
-                term.clear_screen()?;
-                term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", Emoji("\u{1F44D}", "Correct"), 100, Emoji("\u{2705}", "Done"), 0, Emoji("\u{1F4E9}", "Remaining"), total_reviews), width, align, None).deref())?;
+                let padded_chars = pad_str(characters, width, align, None);
+                let char_line = match subject {
+                    Subject::Radical(_) => style(padded_chars).white().on_blue().to_string(),
+                    Subject::Kanji(_) => style(padded_chars).white().on_red().to_string(),
+                    _ => style(padded_chars).white().on_magenta().to_string(),
+                };
 
-                term.write_line(pad_str(characters, width, align, None).deref())?;
-                term.write_line(pad_str(&format!("{}:", review_type_text), width, align, None).deref())?;
+                // Print status line
+                print_review_screen(&term, done, failed, total_reviews, width, align, &char_line, review_type_text)?;
                 term.move_cursor_to(width / 2, 3)?;
                 term.flush()?;
 
-                let mut input = String::new();
                 loop {
-                    let char = term.read_char()?;
-                    match char {
-                        '\u{000A}' => break,
-                        c => {
-                            input.push(c);
+                    let mut input = String::new();
+                    loop {
+                        let char = term.read_key()?;
+                        match char {
+                            console::Key::Enter => {
+                                break;
+                            },
+                            console::Key::Backspace => {
+                                input.pop();
+                            },
+                            console::Key::Char(c) => {
+                                input.push(c);
+                            },
+                            _ => {},
+                        };
 
-                            // Print status line
-                            term.clear_screen()?;
-                            term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", Emoji("\u{1F44D}", "Correct"), 100, Emoji("\u{2705}", "Done"), 0, Emoji("\u{1F4E9}", "Remaining"), total_reviews), width, align, None).deref())?;
+                        // Print status line
+                        print_review_screen(&term, done, failed, total_reviews, width, align, &char_line, review_type_text)?;
+                        term.write_line(pad_str(&input, width, align, None).deref())?;
+                        term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
+                        term.flush()?;
+                    }
 
-                            term.write_line(pad_str(characters, width, align, None).deref())?;
-                            term.write_line(pad_str(&format!("{}:", review_type_text), width, align, None).deref())?;
-                            term.write_line(pad_str(&input, width, align, None).deref())?;
-                            term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
-                            term.flush()?;
+                    if input.is_empty() {
+                        continue;
+                    }
+
+                    let guess = input.to_lowercase();
+
+                    let correct = match subject {
+                        Subject::KanaVocab(v) => wanidata::is_meaning_correct(&v.data.meanings, &guess),
+                        Subject::Radical(r) => wanidata::is_meaning_correct(&r.data.meanings, &guess),
+                        Subject::Kanji(k) => {
+                            if is_meaning {
+                                wanidata::is_meaning_correct(&k.data.meanings, &guess)
+                            }
+                            else {
+                                wanidata::is_reading_correct(&k.data.readings, &guess)
+                            }
+                        },
+                        Subject::Vocab(v) => {
+                            if is_meaning {
+                                wanidata::is_meaning_correct(&v.data.meanings, &guess)
+                            }
+                            else {
+                                wanidata::is_vocab_reading_correct(&v.data.readings, &guess)
+                            }
                         },
                     };
+
+                    if correct {
+                        review.status = match subject {
+                            Subject::Radical(_) | Subject::KanaVocab(_) => wanidata::ReviewStatus::Done,
+                            Subject::Kanji(_) | Subject::Vocab(_) => {
+                                match review.status {
+                                    wanidata::ReviewStatus::NotStarted => {
+                                        if is_meaning { 
+                                            ReviewStatus::MeaningDone
+                                        }
+                                        else {
+                                            ReviewStatus::ReadingDone
+                                        }
+                                    },
+                                    _ => { 
+                                        done += 1;
+                                        if review.incorrect_meaning_answers > 0 || review.incorrect_reading_answers > 0 {
+                                            failed += 1;
+                                        }
+                                        batch.pop();
+                                        ReviewStatus::Done
+                                    }
+                                }
+                            },
+                        }
+                    }
+                    else {
+                        if is_meaning {
+                            review.incorrect_meaning_answers += 1;
+                        }
+                        else {
+                            review.incorrect_reading_answers += 1;
+                        }
+                    }
+
+                    break;
                 }
             }
 
