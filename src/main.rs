@@ -53,6 +53,7 @@ enum Command {
     CacheInfo,
     QueryRadicals,
     QueryKanji,
+    QueryVocab,
     TestSubject,
 }
 
@@ -102,11 +103,32 @@ fn main() {
                 Command::CacheInfo => command_cache_info(&args),
                 Command::QueryRadicals => command_query_radicals(&args),
                 Command::QueryKanji => command_query_kanji(&args),
+                Command::QueryVocab => command_query_vocab(&args),
                 Command::TestSubject => command_test_subject(&args),
             }
         },
         None => command_summary(&args),
     }
+
+}
+
+fn command_query_vocab(args: &Args) {
+    let conn = setup_connection(&args);
+    match conn {
+        Err(e) => println!("{}", e),
+        Ok(c) => {
+            let mut stmt = c.prepare(wanisql::SELECT_ALL_VOCAB).unwrap();
+            match stmt.query_map([], |v| wanisql::parse_vocab(v)
+                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                Ok(vocab) => {
+                    for v in vocab {
+                        println!("{:?}", v)
+                    }
+                },
+                Err(_) => {},
+            };
+        },
+    };
 
 }
 
@@ -228,8 +250,8 @@ fn command_sync(args: &Args, ignore_cache: bool) {
                         let mut parse_fails = 0;
                         let mut radicals: Vec<wanidata::Radical> = vec![];
                         let mut kanji: Vec<wanidata::Kanji> = vec![];
-                        let mut vocab: Vec<String> = vec![];
-                        let mut kana_vocab: Vec<String> = vec![];
+                        let mut vocab: Vec<wanidata::Vocab> = vec![];
+                        let mut kana_vocab: Vec<wanidata::KanaVocab> = vec![];
                         for wd in c.data {
                             match wd {
                                 WaniData::Radical(r) => {
@@ -239,20 +261,10 @@ fn command_sync(args: &Args, ignore_cache: bool) {
                                     kanji.push(k);
                                 },
                                 WaniData::Vocabulary(v) => {
-                                    if let Ok(s) = wanidata::Vocab::to_sql_str(&v) {
-                                        vocab.push(s);
-                                    }
-                                    else {
-                                        parse_fails += 1;
-                                    }
+                                    vocab.push(v);
                                 },
                                 WaniData::KanaVocabulary(kv) => {
-                                    if let Ok(s) = wanidata::KanaVocab::to_sql_str(&kv) {
-                                        kana_vocab.push(s);
-                                    }
-                                    else {
-                                        parse_fails += 1;
-                                    }
+                                    kana_vocab.push(kv);
                                 },
                                 _ => {},
                             }
@@ -298,7 +310,27 @@ fn command_sync(args: &Args, ignore_cache: bool) {
                             }
                         }
 
-                        println!("Updated Resources: {}", rad_len + kanji_len + vocab.len() + kana_vocab.len());
+                        let stmt_res = conn.prepare(wanisql::INSERT_VOCAB);
+                        let vocab_len = vocab.len();
+                        match stmt_res {
+                            Ok(mut stmt) => {
+                                for v in vocab {
+                                    match wanisql::store_vocab(v, &mut stmt) {
+                                        Err(e) => {
+                                            println!("Error inserting into vocab.\n{}", e);
+                                            parse_fails += 1;
+                                        }
+                                        Ok(_) => {},
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                println!("Error preparing insert into vocab statement. Error: {}", e);
+                                parse_fails += vocab_len;
+                            }
+                        }
+
+                        println!("Updated Resources: {}", rad_len + kanji_len + vocab_len + kana_vocab.len());
                         if parse_fails > 0 {
                             println!("Parse Failures: {}", parse_fails);
                         }
