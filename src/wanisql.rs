@@ -1,3 +1,4 @@
+/// Helpers for loading/storing wanidata in Sqlite DB
 
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::Transaction;
