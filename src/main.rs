@@ -91,21 +91,6 @@ enum Command {
     ForceSync,
     /// Does first-time initialization
     Init,
-
-    // Debug/Testing commands:
-    /// Check the cache info in db
-    CacheInfo,
-    QueryRadicals,
-    QueryKanji,
-    QueryVocab,
-    QueryKanaVocab,
-    QueryAssignments,
-    QueryUser,
-    QueryReviews,
-    QueryLessons,
-    ClearReviews,
-    TestSubject,
-    TestThrottle,
 }
 
 /// Info saved to program config file
@@ -199,13 +184,60 @@ struct AudioMessage {
 
 type RateLimitBox = Arc<Mutex<Option<RateLimit>>>;
 
-// TODO - only pub to silence warning
 #[derive(Default)]
 struct CacheInfo {
-    id: usize,
+    id: usize, // See CACHE_TYPE_* constants
     etag: Option<String>,
     last_modified: Option<String>,
     updated_after: Option<String>,
+}
+
+const CACHE_TYPE_SUBJECTS: usize = 0;
+const CACHE_TYPE_ASSIGNMENTS: usize = 1;
+const CACHE_TYPE_USER: usize = 2;
+
+#[derive(Default)]
+struct SubjectCounts {
+    radical_count: usize,
+    kanji_count: usize,
+    vocab_count: usize,
+}
+
+enum ReviewType {
+    Lesson(SubjectCounts),
+    Review(ReviewStats),
+}
+
+#[derive(Default)]
+struct ReviewStats {
+    done: usize,
+    failed: usize,
+    guesses: usize,
+    total_reviews: usize
+}
+
+#[derive(Default, Debug)]
+struct LoadedReviews {
+    invalid_reviews: Vec<NewReview>,
+    finished_reviews: Vec<NewReview>,
+    in_progress_reviews: Vec<NewReview>,
+}
+
+#[derive(Default)]
+enum RequestMethod {
+    #[default]
+    Get,
+    Post,
+    Put,
+}
+
+#[derive(Default)]
+struct RequestInfo<'a, T: serde::Serialize + Sized> {
+    url: String,
+    method: RequestMethod,
+    query: Option<Vec<(&'a str, &'a str)>>,
+    headers: Option<Vec<(String, String)>>,
+    json: Option<T>,
 }
 
 #[tokio::main]
@@ -224,264 +256,12 @@ async fn main() -> Result<(), WaniError> {
                 Command::R => command_review(&args).await,
                 Command::Lesson => command_lesson(&args).await,
                 Command::L => command_lesson(&args).await,
-
-                // Testing
-                Command::CacheInfo => command_cache_info(&args),
-                Command::QueryRadicals => command_query_radicals(&args),
-                Command::QueryKanji => command_query_kanji(&args),
-                Command::QueryVocab => command_query_vocab(&args),
-                Command::QueryKanaVocab => command_query_kana_vocab(&args),
-                Command::QueryAssignments => command_query_assignments(&args),
-                Command::QueryUser=> command_query_user(&args),
-                Command::QueryReviews => command_query_reviews(&args),
-                Command::QueryLessons => command_query_lessons(&args),
-                Command::ClearReviews => command_clear_reviews(&args),
-                Command::TestSubject => command_test_subject(&args).await,
-                Command::TestThrottle => command_test_throttle(&args).await,
             };
         },
         None => command_summary(&args).await,
     };
 
     Ok(())
-}
-
-fn command_clear_reviews(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let _ = c.execute(wanisql::CLEAR_REVIEWS, []);
-        },
-    };
-}
-
-fn command_query_user(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let mut stmt = c.prepare(wanisql::SELECT_USER).unwrap();
-            match stmt.query_map([], |a| wanisql::parse_user(a)
-                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
-                Ok(reviews) => {
-                    for r in reviews {
-                        println!("{:?}", r);
-                    }
-                },
-                Err(e) => {
-                    println!("{}", e);
-                },
-            };
-        },
-    };
-}
-
-fn command_query_lessons(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let mut stmt = c.prepare(wanisql::SELECT_LESSONS).unwrap();
-            match stmt.query_map([], |a| wanisql::parse_review(a)
-                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
-                Ok(reviews) => {
-                    let mut count = 0;
-                    for r in reviews {
-                        println!("{:?}", r);
-                        count += 1;
-                    }
-
-                    println!("Count: {}", count);
-                },
-                Err(_) => {},
-            };
-        },
-    };
-}
-
-fn command_query_reviews(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let mut stmt = c.prepare(wanisql::SELECT_REVIEWS).unwrap();
-            match stmt.query_map([], |a| wanisql::parse_review(a)
-                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
-                Ok(reviews) => {
-                    let mut count = 0;
-                    for r in reviews {
-                        println!("{:?}", r);
-                        count += 1;
-                    }
-                    println!("Count: {}", count);
-                },
-                Err(_) => {},
-            };
-        },
-    };
-}
-
-fn command_query_assignments(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let mut stmt = c.prepare(wanisql::SELECT_AVAILABLE_ASSIGNMENTS).unwrap();
-            match stmt.query_map([Utc::now().timestamp()], |a| wanisql::parse_assignment(a)
-                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
-                Ok(assigns) => {
-                    for a in assigns {
-                        println!("{:?}", a)
-                    }
-                },
-                Err(_) => {},
-            };
-        },
-    };
-
-}
-
-fn command_query_kana_vocab(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let mut stmt = c.prepare(wanisql::SELECT_ALL_KANA_VOCAB).unwrap();
-            match stmt.query_map([], |v| wanisql::parse_kana_vocab(v)
-                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
-                Ok(kana_vocab) => {
-                    for v in kana_vocab {
-                        println!("{:?}", v)
-                    }
-                },
-                Err(_) => {},
-            };
-        },
-    };
-}
-
-fn command_query_vocab(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let args = [];
-            let mut stmt = c.prepare(wanisql::SELECT_ALL_VOCAB).unwrap();
-            match stmt.query_map(args, |v| wanisql::parse_vocab(v)
-                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
-                Ok(vocab) => {
-                    for v in vocab {
-                        println!("{:?}", v)
-                    }
-                },
-                Err(e) => { println!("{}", e)},
-            };
-        },
-    };
-
-}
-
-fn command_query_kanji(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let mut stmt = c.prepare(wanisql::SELECT_ALL_KANJI).unwrap();
-            match stmt.query_map([], |k| wanisql::parse_kanji(k)
-                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
-                Ok(kanji) => {
-                    for k in kanji {
-                        println!("{:?}", k)
-                    }
-                },
-                Err(_) => {},
-            };
-        },
-    };
-
-}
-
-fn command_query_radicals(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let mut stmt = c.prepare(wanisql::SELECT_ALL_RADICALS).unwrap();
-            match stmt.query_map([], |r| wanisql::parse_radical(r)
-                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
-                Ok(radicals) => {
-                    for r in radicals {
-                        println!("{:?}", r)
-                    }
-                },
-                Err(_) => {},
-            };
-        },
-    };
 }
 
 // TODO - command to preload audios
@@ -779,8 +559,6 @@ where I: Iterator<Item = &'a NewReview> {
     Ok(saved_reviews)
 }
 
-
-
 async fn command_lesson(args: &Args) {
     let p_config = get_program_config(args);
     if let Err(e) = &p_config {
@@ -949,13 +727,6 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
     Ok(())
 }
 
-#[derive(Default)]
-struct SubjectCounts {
-    radical_count: usize,
-    kanji_count: usize,
-    vocab_count: usize,
-}
-
 async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewType, subjects: &HashMap<i32, Subject>, image_cache: &PathBuf, web_config: &WaniWebConfig, conn: &AsyncConnection, audio_tx: &Sender<AudioMessage>, p_config: &ProgramConfig, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
     if batch.len() == 0 {
         return Ok(());
@@ -1089,19 +860,6 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
     let _ = save_lessons(reviews, rate_limit, web_config, conn).await;
 
     Ok(())
-}
-
-enum ReviewType {
-    Lesson(SubjectCounts),
-    Review(ReviewStats),
-}
-
-#[derive(Default)]
-struct ReviewStats {
-    done: usize,
-    failed: usize,
-    guesses: usize,
-    total_reviews: usize
 }
 
 async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>, rev_type: &mut ReviewType, audio_tx: &Sender<AudioMessage>, connection: &AsyncConnection) -> Result<(), WaniError> {
@@ -2641,13 +2399,6 @@ fn split_str_by_len(s: &str, l: usize, v: &mut Vec<String>) {
     }
 }
 
-#[derive(Default, Debug)]
-struct LoadedReviews {
-    invalid_reviews: Vec<NewReview>,
-    finished_reviews: Vec<NewReview>,
-    in_progress_reviews: Vec<NewReview>,
-}
-
 async fn load_existing_lessons(c: &AsyncConnection, assignments: &Vec<wanidata::Assignment>) -> Result<LoadedReviews, tokio_rusqlite::Error> {
     let assignments: HashSet<i32, RandomState> = HashSet::from_iter(assignments.iter().map(|a| a.id));
 
@@ -2780,45 +2531,6 @@ where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_
             }
         }
     }).await;
-}
-
-fn command_cache_info(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
-    let conn = setup_connection(&p_config);
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let mut stmt = c.prepare("select * from cache_info").unwrap();
-            match stmt.query_map([], 
-                        |r| Ok((r.get::<usize, i32>(0)?, r.get::<usize, Option<String>>(1)?, r.get::<usize, Option<String>>(2)?, r.get::<usize, Option<String>>(3)?))) {
-                Ok(infos) => {
-                    for info in infos {
-                        match info {
-                            Ok(t) => {
-                                println!("CacheInfo: Type {}, ETag {}, LastMod {}, UpdatedAfter {}", 
-                                         t.0, 
-                                         t.1.unwrap_or("None".into()), 
-                                         t.2.unwrap_or("None".into()), 
-                                         t.3.unwrap_or("None".into()));
-                            },
-                            Err(e) => {
-                                println!("Error parsing sql row for cache info. Error {}", e);
-                            },
-                        }
-                    }
-                },
-                Err(e) => {
-                    println!("Error checking cache_info: {}", e);
-                }
-            };
-        },
-    };
 }
 
 async fn get_all_cache_infos(conn: &AsyncConnection, ignore_cache: bool) -> Result<HashMap<usize, CacheInfo>, WaniError> {
@@ -3297,10 +3009,6 @@ fn command_init(p_config: &ProgramConfig) {
     };
 }
 
-const CACHE_TYPE_SUBJECTS: usize = 0;
-const CACHE_TYPE_ASSIGNMENTS: usize = 1;
-const CACHE_TYPE_USER: usize = 2;
-
 fn setup_db(c: &Connection) -> Result<(), SqlError> {
     // Arrays of non-id'ed objects will be stored as json
     // Arrays of ints will be stored as json "[1,2,3]"
@@ -3330,89 +3038,6 @@ fn setup_db(c: &Connection) -> Result<(), SqlError> {
     c.execute(wanisql::CREATE_ASSIGNMENTS_INDEX, [])?;
     c.execute(wanisql::CREATE_USER_TBL, [])?;
     Ok(())
-}
-async fn command_test_throttle(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-    }
-    let p_config = p_config.unwrap();
-    let web_config = get_web_config(&p_config);
-    if let Err(e) = web_config {
-        println!("{}", e);
-        return;
-    }
-
-    let web_config = web_config.unwrap();
-
-    let now = Utc::now().to_rfc3339();
-    let rate_limit = Arc::new(Mutex::new(Some(RateLimit {
-        limit: 60,
-        remaining: 1,
-        reset: u64::try_from(Utc::now().timestamp() + 3).unwrap(),
-    })));
-
-    println!("{:?}", rate_limit);
-
-    for i in 0..150 {
-        let info = RequestInfo::<()> {
-            url: "https://api.wanikani.com/v2/assignments".to_owned(),
-            method: RequestMethod::Get,
-            query: Some(vec![("updated_after", &now)]),
-            ..Default::default()
-        };
-
-        let rate_limit_local = rate_limit.clone();
-        let web_config = web_config.clone();
-        let _ = send_throttled_request(info, rate_limit_local, web_config).await;
-        println!("{} - {:?}", i, rate_limit.lock().await.deref());
-    }
-
-    println!("All Done!");
-}
-
-async fn command_test_subject(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-    }
-    let p_config = p_config.unwrap();
-    let web_config = get_web_config(&p_config);
-    if let Err(e) = web_config {
-        println!("{}", e);
-        return;
-    }
-
-    let web_config = web_config.unwrap();
-    let query = &[("levels", "5")];
-    let response = web_config.client
-        .get("https://api.wanikani.com/v2/subjects")
-        .header("Wanikani-Revision", &web_config.revision)
-        .query(query)
-        .bearer_auth(web_config.auth)
-        .send();
-
-    match parse_response(response.await).await {
-        Ok(t) => test_handle_wani_resp(t.0),
-        Err(s) => println!("{}", s),
-    }
-}
-
-#[derive(Default)]
-enum RequestMethod {
-    #[default]
-    Get,
-    Post,
-    Put,
-}
-
-#[derive(Default)]
-struct RequestInfo<'a, T: serde::Serialize + Sized> {
-    url: String,
-    method: RequestMethod,
-    query: Option<Vec<(&'a str, &'a str)>>,
-    headers: Option<Vec<(String, String)>>,
-    json: Option<T>,
 }
 
 fn build_request<'a, T: serde::Serialize + Sized>(info: &RequestInfo<'a, T>, web_config: &WaniWebConfig) -> reqwest::RequestBuilder {

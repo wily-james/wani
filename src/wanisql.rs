@@ -72,8 +72,6 @@ pub(crate) const SELECT_LESSONS: &str = "select
                             status,
                             available_at from new_reviews where available_at is null;";
 
-pub(crate) const CLEAR_REVIEWS: &str = "delete from new_reviews";
-
 pub(crate) const REMOVE_REVIEW: &str = "delete from new_reviews where assignment_id = ?1;";
 
 pub(crate) fn parse_review(r: &rusqlite::Row<'_>) -> Result<wanidata::NewReview, WaniError> {
@@ -258,22 +256,6 @@ pub(crate) const INSERT_RADICALS: &str = "replace into radicals
                              character_images)
                             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 
-pub(crate) const SELECT_ALL_RADICALS: &str = "select 
-                                     id,
-                                      aux_meanings,
-                                      created_at,
-                                      document_url,
-                                      hidden_at,
-                                      lesson_position,
-                                      level,
-                                      meaning_mnemonic,
-                                      meanings,
-                                      slug,
-                                      srs_id,
-                                      amalgamation_subject_ids,
-                                      characters,
-                                      character_images from radicals;";
-
 pub(crate) fn select_radicals_by_id(n: usize) -> String {
     return format!("select 
                    id,
@@ -385,26 +367,6 @@ pub(crate) const INSERT_KANJI: &str = "replace into kanji
                              readings,
                              visually_similar_subject_ids)
                             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)";
-
-pub(crate) const SELECT_ALL_KANJI: &str = "select id,
-                             aux_meanings,
-                             created_at,
-                             document_url,
-                             hidden_at,
-                             lesson_position,
-                             level,
-                             meaning_mnemonic,
-                             meanings,
-                             slug,
-                             srs_id,
-                             characters,
-                             amalgamation_subject_ids,
-                             component_subject_ids,
-                             meaning_hint,
-                             reading_hint,
-                             reading_mnemonic,
-                             readings,
-                             visually_similar_subject_ids from kanji;";
 
 pub(crate) fn select_kanji_by_id(n: usize) -> String {
     return format!("select id,
@@ -529,25 +491,6 @@ pub(crate) const INSERT_VOCAB: &str = "replace into vocab
                              readings,
                              reading_mnemonic)
                             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
-
-pub(crate) const SELECT_ALL_VOCAB: &str = "select id,
-                             aux_meanings,
-                             created_at,
-                             document_url,
-                             hidden_at,
-                             lesson_position,
-                             level,
-                             meaning_mnemonic,
-                             meanings,
-                             slug,
-                             srs_id,
-                             characters,
-                             component_subject_ids,
-                             context_sentences,
-                             parts_of_speech,
-                             pronunciation_audios,
-                             readings,
-                             reading_mnemonic from vocab;";
 
 pub(crate) fn select_vocab_by_id(n: usize) -> String {
     return format!("select id,
@@ -685,22 +628,6 @@ pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Transaction<'_
         );
     return stmt.execute(INSERT_KANA_VOCAB, p);
 }
-
-pub(crate) const SELECT_ALL_KANA_VOCAB: &str = "select id,
-                             aux_meanings,
-                             created_at,
-                             document_url,
-                             hidden_at,
-                             lesson_position,
-                             level,
-                             meaning_mnemonic,
-                             meanings,
-                             slug,
-                             srs_id,
-                             characters,
-                             context_sentences,
-                             parts_of_speech,
-                             pronunciation_audios from kana_vocab;";
 
 pub(crate) fn select_kana_vocab_by_id(n: usize) -> String {
     return format!("select id,
