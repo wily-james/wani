@@ -5,7 +5,7 @@ use chrono::{
     DateTime,
     Utc,
 };
-use wana_kana::IsJapaneseChar;
+use wana_kana::{IsJapaneseChar, IsJapaneseStr};
 
 #[derive(Debug, Deserialize)]
 pub struct WaniResp {
@@ -752,6 +752,10 @@ where T: Answer, U: Answer, V: Answer {
             return AnswerResult::BadFormatting;
         }
 
+        if guess.is_mixed() {
+            return AnswerResult::BadFormatting;
+        }
+
         if !allow_fuzzy {
             return best;
         }
@@ -1055,6 +1059,28 @@ mod tests {
 
             assert!(matches!(result, AnswerResult::BadFormatting));
         }
+    }
+
+    #[test]
+    fn is_correct_answer_mixed_kana() {
+        let is_meaning = true;
+        let kanji = get_standard_kanji();
+        let subj = Subject::Kanji(kanji);
+        let guess = "おn";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::BadFormatting));
+    }
+
+    #[test]
+    fn is_correct_answer_mixed_kana_reading() {
+        let is_meaning = false;
+        let kanji = get_standard_kanji();
+        let subj = Subject::Kanji(kanji);
+        let guess = "おn";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::BadFormatting));
     }
 
     #[test]
