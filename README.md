@@ -58,7 +58,7 @@ colorblind: true
 datapath: /some/path
 ```
 
-#### Option explanations:
+#### Options (all are optional):
 Specify your WaniKani personal API token. See https://www.wanikani.com/settings/personal_access_tokens
 ```
 auth: your_auth_token
