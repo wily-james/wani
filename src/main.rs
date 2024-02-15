@@ -484,13 +484,13 @@ fn print_lesson_screen(term: &Term, char_line: &[String], meaning_line: &Option<
 }
 
 // TODO - fix these statistics wrt multiple batches
-fn print_review_screen(term: &Term, done: usize, guesses: usize, failed: usize, total_reviews: usize, width: usize, align: console::Alignment, char_lines: &Vec<String>, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
+fn print_review_screen(term: &Term, stats: &ReviewStats, width: usize, align: console::Alignment, char_lines: &Vec<String>, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
     term.clear_screen()?;
-    let correct_percentage = if guesses == 0 { 100 } else { ((guesses as f64 - failed as f64) / guesses as f64 * 100.0) as i32 };
+    let correct_percentage = if stats.guesses == 0 { 100 } else { ((stats.guesses as f64 - stats.failed as f64) / stats.guesses as f64 * 100.0) as i32 };
     term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", 
                                      Emoji("\u{1F44D}", "Correct"), correct_percentage, 
-                                     Emoji("\u{2705}", "Done"), done, 
-                                     Emoji("\u{1F4E9}", "Remaining"), total_reviews - done), 
+                                     Emoji("\u{2705}", "Done"), stats.done, 
+                                     Emoji("\u{1F4E9}", "Remaining"), stats.total_reviews - stats.done), 
                             width, align, None).deref())?;
     for char_line in char_lines {
         term.write_line(char_line)?;
@@ -876,16 +876,21 @@ async fn do_lesson_batch(batch: Vec<Assignment>, subj_counts: &SubjectCounts, su
     Ok(())
 }
 
-async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>, total_reviews: usize, audio_tx: &Sender<AudioMessage>, connection: &AsyncConnection) -> Result<(), WaniError> {
+#[derive(Default)]
+struct ReviewStats {
+    done: usize,
+    failed: usize,
+    guesses: usize,
+    total_reviews: usize
+}
+
+async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>, stats: &mut ReviewStats, audio_tx: &Sender<AudioMessage>, connection: &AsyncConnection) -> Result<(), WaniError> {
     enum AnswerColor {
         Green,
         Red,
         Gray
     }
     let term = Term::buffered_stdout();
-    let mut done = 0;
-    let mut failed = 0;
-    let mut guesses = 0;
     let rng = &mut thread_rng();
     let width = 80;
     let text_width = 50;
@@ -953,7 +958,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
         }).collect_vec();
 
         let mut toast = None;
-        print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, "")?;
+        print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, "")?;
         term.move_cursor_to(width / 2, 2 + characters.len())?;
         term.flush()?;
 
@@ -983,7 +988,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                 });
                 vis_input = if is_meaning { &input } else { &kana_input };
                 let input_padded = pad_str(&vis_input, width, align, None);
-                print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_padded)?;
+                print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, &input_padded)?;
                 let input_width = console::measure_text_width(&vis_input);
                 term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
                 term.flush()?;
@@ -1000,6 +1005,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
             let tuple = match answer_result {
                 wanidata::AnswerResult::BadFormatting => (true, Some("Try again!"), AnswerColor::Gray),
                 wanidata::AnswerResult::KanaWhenMeaning => (true, Some("We want the reading, not the meaning."), AnswerColor::Gray),
+
                 wanidata::AnswerResult::FuzzyCorrect | wanidata::AnswerResult::Correct => {
                     let mut toast = correct_msg;
                     if let wanidata::AnswerResult::FuzzyCorrect = answer_result {
@@ -1009,10 +1015,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                     review.status = match subject {
                         Subject::Radical(_) | Subject::KanaVocab(_) => 
                         {
-                            done += 1;
-                            if review.incorrect_meaning_answers > 0 || review.incorrect_reading_answers > 0 {
-                                failed += 1;
-                            }
+                            stats.done += 1;
                             batch.pop();
                             wanidata::ReviewStatus::Done
                         },
@@ -1027,10 +1030,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                                     }
                                 },
                                 _ => { 
-                                    done += 1;
-                                    if review.incorrect_meaning_answers > 0 || review.incorrect_reading_answers > 0 {
-                                        failed += 1;
-                                    }
+                                    stats.done += 1;
                                     batch.pop();
                                     ReviewStatus::Done
                                 }
@@ -1040,7 +1040,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                     (false, toast, AnswerColor::Green)
                 },
                 wanidata::AnswerResult::Incorrect => {
-                    failed += 1;
+                    stats.failed += 1;
                     if is_meaning {
                         review.incorrect_meaning_answers += 1;
                     }
@@ -1054,7 +1054,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
             toast = tuple.1;
 
             if !tuple.0 {
-                guesses += 1;
+                stats.guesses += 1;
             }
 
             let input_line = pad_str(&vis_input, width, align, None);
@@ -1070,7 +1070,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                 },
             };
 
-            print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
+            print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
             let input_width = console::measure_text_width(&vis_input);
             term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
             term.flush()?;
@@ -1142,7 +1142,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                     _ => {},
                 }
 
-                print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
+                print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
                 if let InfoStatus::Open(info_status) = info_status {
                     let lines = get_info_lines(&subject, info_status, width, text_width, align, &wfmt_args, is_meaning, connection).await;
                     for line in &lines {
@@ -1160,7 +1160,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
             }
 
             toast = None;
-            print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &"")?;
+            print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, &"")?;
             let input_width = 0;
             term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
             term.flush()?;
@@ -1231,7 +1231,12 @@ async fn command_review(args: &Args) {
 
         let mut review_result = None;
         let mut first_reviews = None;
-        let total_assignments = assignments.len();
+
+        let total_assignments = assignments.len() + if let Some(batch) = &first_batch { batch.len() } else { 0 };
+        let mut stats = ReviewStats {
+            total_reviews: total_assignments,
+            ..Default::default()
+        };
         while assignments.len() > 0 {
             let mut batch = match first_batch { 
                 None => { 
@@ -1277,7 +1282,7 @@ async fn command_review(args: &Args) {
                 reviews
             };
 
-            let res = do_reviews_inner(&subjects, web_config, p_config, image_cache, &mut reviews, &mut batch, total_assignments, &audio_tx, conn).await;
+            let res = do_reviews_inner(&subjects, web_config, p_config, image_cache, &mut reviews, &mut batch, &mut stats, &audio_tx, conn).await;
             if let Err(e) = &res {
                 match &e {
                     WaniError::Io(err) => {
