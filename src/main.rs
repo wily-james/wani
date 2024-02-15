@@ -4,6 +4,7 @@ mod wanisql;
 use crate::wanidata::WaniData;
 use crate::wanidata::WaniResp;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
+use chrono::DateTime;
 use clap::{Parser, Subcommand};
 use chrono::Utc;
 use reqwest::Response;
@@ -281,6 +282,7 @@ async fn command_review(args: &Args) {
     let client = Client::new();
 
     let mut assignments = vec![];
+    let mut last_request_time: Option<DateTime<Utc>> = None;
     while let Some(url) = next_url {
         next_url = None;
         let mut request = client
@@ -292,6 +294,7 @@ async fn command_review(args: &Args) {
             request = request.query(&[("updated_after", updated_after)]);
         }
 
+        last_request_time = Some(Utc::now());
         match parse_response(request.send().await).await {
             Ok(t) => {
                 match t.0.data {
@@ -307,6 +310,8 @@ async fn command_review(args: &Args) {
                         }
                     },
                     _ => {
+                        last_request_time = None; // clear last request time to avoid invalidate
+                                                  // cache
                         println!("Unexpected response when fetching assignment data. {:?}", t.0.data);
                     },
                 }
@@ -316,7 +321,15 @@ async fn command_review(args: &Args) {
                 return;
             }
         }
+    }
 
+    if let Some(time) = last_request_time {
+        match update_cache(None, CACHE_TYPE_ASSIGNMENTS, time, &conn) {
+            Ok(_) => (),
+            Err(e) => { 
+                println!("Failed to update assignment cache. Error: {}", e);
+            },
+        }
     }
     
     let ass_count = assignments.len();
@@ -536,8 +549,10 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
             if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED)
             {
                 if let Ok(t) = tag.to_str() {
-                    conn.execute("update cache_info set last_modified = ?1, updated_after = ?2, etag = ?3 where id = ?4;", params![t, &last_request_time.to_rfc3339(), Option::<String>::None, "0"])
-                        .unwrap();
+                    update_cache(Some(t), CACHE_TYPE_SUBJECTS, last_request_time, &conn).unwrap();
+                }
+                else {
+                    update_cache(None, CACHE_TYPE_SUBJECTS, last_request_time, &conn).unwrap();
                 }
             }
         }
@@ -551,6 +566,11 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
             c.close().unwrap();
         },
     };
+}
+
+fn update_cache(last_modified: Option<&str>, cache_type: usize, last_request_time: DateTime<Utc>, conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute("update cache_info set last_modified = ?1, updated_after = ?2, etag = ?3 where id = ?4;", params![last_modified, &last_request_time.to_rfc3339(), Option::<String>::None, cache_type])?;
+    Ok(())
 }
 
 fn command_init(args: &Args) {
