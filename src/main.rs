@@ -1061,6 +1061,7 @@ async fn command_review(args: &Args) {
                     ass_cache_info = info;
                 }
             }
+            println!("Syncing assignments. . .");
             let _ = sync_assignments(&c, &web_config, ass_cache_info, &rate_limit).await;
 
             let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, [Utc::now().timestamp()]).await;
