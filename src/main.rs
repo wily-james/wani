@@ -3,6 +3,8 @@ mod wanisql;
 
 use crate::wanidata::WaniData;
 use crate::wanidata::WaniResp;
+use std::collections::HashMap;
+use std::sync::PoisonError;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
@@ -16,6 +18,8 @@ use rusqlite::{
     Connection, Error as SqlError
 };
 use thiserror::Error;
+use tokio::join;
+use tokio_rusqlite::Connection as AsyncConnection;
 
 #[derive(Parser)]
 struct Args {
@@ -71,6 +75,7 @@ struct ProgramConfig {
 
 /// Info needed to make WaniKani web requests
 struct WaniWebConfig {
+    client: Client,
     auth: String,
     revision: String,
 }
@@ -81,7 +86,16 @@ enum WaniError {
     Generic(String),
     Parse(#[from] serde_json::Error),
     Sql(#[from] SqlError),
+    AsyncSql(#[from] tokio_rusqlite::Error),
     Chrono(#[from] chrono::ParseError),
+    Poison,
+    JoinError(#[from] tokio::task::JoinError)
+}
+
+impl<T> From<PoisonError<T>> for WaniError {
+    fn from(_err: PoisonError<T>) -> Self {
+        Self::Poison
+    }
 }
 
 impl Display for WaniError {
@@ -90,14 +104,19 @@ impl Display for WaniError {
             WaniError::Generic(g) => f.write_str(g),
             WaniError::Parse(e) => e.fmt(f),
             WaniError::Sql(e) => e.fmt(f),
+            WaniError::AsyncSql(e) => e.fmt(f),
             WaniError::Chrono(e) => e.fmt(f),
+            WaniError::Poison => f.write_str("Error: Mutex poisoned."),
+            WaniError::JoinError(e) => e.fmt(f),
         }
     }
 }
 
+// TODO - only pub to silence warning
 #[derive(Default)]
-struct CacheInfo {
-    etag: Option<String>,
+pub struct CacheInfo {
+    id: usize,
+    pub etag: Option<String>,
     last_modified: Option<String>,
     updated_after: Option<String>,
 }
@@ -262,140 +281,143 @@ fn command_cache_info(args: &Args) {
     };
 }
 
-async fn command_review(args: &Args) {
-    let conn = setup_connection(&args);
-    if let Err(e) = conn {
-        println!("Error setting up database connection. Error: {}", e);
-        return;
-    }
-    let conn = conn.unwrap();
-
-    let web_config = get_web_config(&args);
-    if let Err(e) = web_config {
-        println!("{}", e);
-        return;
-    }
-
-    let mut next_url = Some("https://api.wanikani.com/v2/assignments".to_owned());
-    let ass_cache = get_cache_info(&conn, CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo::default());
-    let web_config = web_config.unwrap();
-    let client = Client::new();
-
-    let mut assignments = vec![];
-    let mut last_request_time: Option<DateTime<Utc>> = None;
-    while let Some(url) = next_url {
-        next_url = None;
-        let mut request = client
-            .get(url)
-            .header("Wanikani-Revision", &web_config.revision)
-            .bearer_auth(&web_config.auth);
-
-        if let Some(updated_after) = &ass_cache.updated_after {
-            request = request.query(&[("updated_after", updated_after)]);
-        }
-
-        last_request_time = Some(Utc::now());
-        match parse_response(request.send().await).await {
-            Ok(t) => {
-                match t.0.data {
-                    WaniData::Collection(c) => {
-                        next_url = c.pages.next_url;
-                        for wd in c.data {
-                            match wd {
-                                WaniData::Assignment(a) => {
-                                    assignments.push(a);
-                                },
-                                _ => {},
-                            }
-                        }
-                    },
-                    _ => {
-                        last_request_time = None; // clear last request time to avoid invalidate
-                                                  // cache
-                        println!("Unexpected response when fetching assignment data. {:?}", t.0.data);
-                    },
-                }
-            },
-            Err(e) => {
-                println!("Failed to fetch current assignment data. Error: {}", e);
-                return;
-            }
-        }
-    }
-
-    if let Some(time) = last_request_time {
-        match update_cache(None, CACHE_TYPE_ASSIGNMENTS, time, &conn) {
-            Ok(_) => (),
-            Err(e) => { 
-                println!("Failed to update assignment cache. Error: {}", e);
-            },
-        }
-    }
-    
-    let ass_count = assignments.len();
-    let mut ass_fail = 0;
-    let stmt_res = conn.prepare(wanisql::INSERT_ASSIGNMENT);
-    match stmt_res {
-        Ok(mut stmt) => {
-            for ass in assignments {
-                match wanisql::store_assignment(ass, &mut stmt) {
-                    Ok(_) => {},
-                    Err(_) => ass_fail += 1,
-                }
-            }
-        },
-        Err(e) => println!("Error preparing store assignments statement. Error {}", e),
-    }
-
-    println!("Stored Assignments: {}", {ass_count});
-    println!("Failed to store: {}", {ass_fail});
-
-    if ass_count == 0 {
-        println!("No assignments to review.");
-    }
-
-    println!("Assignments: {}", ass_count);
-}
-
 fn get_cache_info(conn: &Connection, cache_type: usize) -> Result<CacheInfo, rusqlite::Error> {
     return conn.query_row("select i.last_modified, i.updated_after, i.etag from cache_info i where id = ?1;",
                              params![cache_type],
                              |r| Ok(CacheInfo {
+                                 id: cache_type,
                                  last_modified: r.get::<usize, Option<String>>(0)?, 
                                  updated_after: r.get::<usize, Option<String>>(1)?,
                                  etag: r.get::<usize, Option<String>>(2)? }));
 }
 
-async fn command_sync(args: &Args, ignore_cache: bool) {
-    async fn sync(args: &Args, conn: &Connection, ignore_cache: bool) {
-        let web_config = get_web_config(&args);
-        if let Err(e) = web_config {
-            println!("{}", e);
-            return;
-        }
+async fn get_all_cache_infos(conn: &AsyncConnection, ignore_cache: bool) -> Result<HashMap<usize, CacheInfo>, WaniError> {
+    if ignore_cache {
+        return Ok(HashMap::new());
+    }
 
-        let mut subjects_cache = CacheInfo { updated_after: None, last_modified: None, etag: None };
-        if !ignore_cache {
-            match get_cache_info(&conn, CACHE_TYPE_SUBJECTS) {
+    Ok(conn.call(|conn| {
+        let mut stmt = conn.prepare("select i.id, i.last_modified, i.updated_after, i.etag from cache_info i;")?;
+        let infos = stmt.query_map([],
+                                   |r| Ok(CacheInfo {
+                                       id: r.get::<usize, usize>(0)?,
+                                       last_modified: r.get::<usize, Option<String>>(1)?, 
+                                       updated_after: r.get::<usize, Option<String>>(2)?,
+                                       etag: r.get::<usize, Option<String>>(3)? }))?;
+
+        let mut map = HashMap::new();
+        for info in infos {
+            if let Ok(i) = info {
+                map.insert(i.id, i);
+            }
+        }
+        return Ok(map);
+    }).await?)
+}
+
+async fn command_review(args: &Args) {
+    todo!()
+}
+
+async fn command_sync(args: &Args, ignore_cache: bool) {
+    struct SyncResult {
+        success_count: usize,
+        fail_count: usize,
+    }
+
+    async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, cache_info: CacheInfo) -> Result<SyncResult, WaniError> {
+        let mut next_url = Some("https://api.wanikani.com/v2/assignments".to_owned());
+
+        let mut assignments = vec![];
+        let mut last_request_time: Option<DateTime<Utc>> = None;
+        while let Some(url) = next_url {
+            next_url = None;
+            let mut request = web_config.client
+                .get(url)
+                .header("Wanikani-Revision", &web_config.revision)
+                .bearer_auth(&web_config.auth);
+
+            if let Some(updated_after) = &cache_info.updated_after {
+                println!("Using assignments updated after: {}", updated_after);
+                request = request.query(&[("updated_after", updated_after)]);
+            }
+            else {
+                println!("No assignments updated after");
+            }
+
+            last_request_time = Some(Utc::now());
+            match parse_response(request.send().await).await {
                 Ok(t) => {
-                    subjects_cache = t;
+                    match t.0.data {
+                        WaniData::Collection(c) => {
+                            next_url = c.pages.next_url;
+                            for wd in c.data {
+                                match wd {
+                                    WaniData::Assignment(a) => {
+                                        assignments.push(a);
+                                    },
+                                    _ => {},
+                                }
+                            }
+                        },
+                        _ => {
+                            last_request_time = None; // clear last request time to avoid invalidate
+                                                      // cache
+                            println!("Unexpected response when fetching assignment data. {:?}", t.0.data);
+                        },
+                    }
                 },
                 Err(e) => {
-                    println!("Error fetching cache_info. Error: {}", e);
-                    return;
+                    println!("Failed to fetch current assignment data. Error: {}", e);
+                    return Err(WaniError::Generic(e));
                 }
             }
         }
 
-        let web_config = web_config.unwrap();
-        let client = Client::new();
+        let ass_count = assignments.len();
+        let ass_fail = conn.call(|c| {
+            let tx = c.transaction();
+            if let Err(e) = tx {
+                return Err(tokio_rusqlite::Error::Rusqlite(e));
+            }
+            let mut tx = tx.unwrap();
+            let mut ass_fail = 0;
+            for ass in assignments {
+                match wanisql::store_assignment(ass, &mut tx) {
+                    Ok(_) => {},
+                    Err(_) => ass_fail += 1,
+                };
+            }
+            tx.commit()?;
+            Ok(ass_fail)
+        }).await?; // Await this before updating cache so we don't update cache if there's a
+                   // problem inserting
+
+        if let Some(time) = last_request_time {
+            match update_cache(None, CACHE_TYPE_ASSIGNMENTS, time, &conn).await {
+                Ok(_) => (),
+                Err(e) => { 
+                    println!("Failed to update assignment cache. Error: {}", e);
+                },
+            }
+        }
+
+        print!("finished ass sync");
+        return Ok(SyncResult {
+            success_count: ass_count,
+            fail_count: ass_fail,
+        });
+    }
+
+    async fn sync_subjects(conn: &AsyncConnection, 
+                           web_config: &WaniWebConfig, subjects_cache: CacheInfo) -> Result<SyncResult, WaniError> {
         let mut next_url: Option<String> = Some("https://api.wanikani.com/v2/subjects".into());
         let mut total_parse_fails = 0;
         let mut updated_resources = 0;
         let mut headers: Option<reqwest::header::HeaderMap> = None;
         let mut last_request_time = Utc::now();
         while let Some(url) = next_url {
-            let mut request = client
+            let mut request = web_config.client
                 .get(url)
                 .header("Wanikani-Revision", &web_config.revision)
                 .bearer_auth(&web_config.auth);
@@ -410,7 +432,10 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
 
             last_request_time = Utc::now();
             next_url = None;
-            match parse_response(request.send().await).await {
+            println!("start request");
+            let resp = request.send().await;
+            println!("got response");
+            match parse_response(resp).await {
                 Ok(t) => {
                     let wr = t.0;
                     headers = Some(t.1);
@@ -422,7 +447,6 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
                             let mut kanji: Vec<wanidata::Kanji> = vec![];
                             let mut vocab: Vec<wanidata::Vocab> = vec![];
                             let mut kana_vocab: Vec<wanidata::KanaVocab> = vec![];
-                            let mut parse_fails = 0;
                             for wd in c.data {
                                 match wd {
                                     WaniData::Radical(r) => {
@@ -441,91 +465,60 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
                                 }
                             }
 
-                            let stmt_res = conn.prepare(wanisql::INSERT_RADICALS);
-                            let rad_len = radicals.len();
-                            match stmt_res {
-                                Ok(mut stmt) => {
-                                    for r in radicals {
-                                        match wanisql::store_radical(r, &mut stmt) {
-                                            Err(e) => {
-                                                println!("Error inserting into radicals.\n{}", e);
-                                                parse_fails += 1;
-                                            }
-                                            Ok(_) => {},
+                            let fut = conn.call(move |conn| {
+                                let mut parse_fails = 0;
+                                let mut tx = conn.transaction()?;
+
+                                let rad_len = radicals.len();
+                                for r in radicals {
+                                    match wanisql::store_radical(r, &mut tx) {
+                                        Err(_) => {
+                                            parse_fails += 1;
                                         }
+                                        Ok(_) => {},
                                     }
-                                },
-                                Err(e) => {
-                                    println!("Error preparing insert into radicals statement. Error: {}", e);
-                                    parse_fails += rad_len;
                                 }
-                            }
 
-                            let stmt_res = conn.prepare(wanisql::INSERT_KANJI);
-                            let kanji_len = kanji.len();
-                            match stmt_res {
-                                Ok(mut stmt) => {
-                                    for k in kanji {
-                                        match wanisql::store_kanji(k, &mut stmt) {
-                                            Err(e) => {
-                                                println!("Error inserting into kanji.\n{}", e);
-                                                parse_fails += 1;
-                                            }
-                                            Ok(_) => {},
+                                let kanji_len = kanji.len();
+                                for k in kanji {
+                                    match wanisql::store_kanji(k, &mut tx) {
+                                        Err(_) => {
+                                            parse_fails += 1;
                                         }
+                                        Ok(_) => {},
                                     }
-                                },
-                                Err(e) => {
-                                    println!("Error preparing insert into kanji statement. Error: {}", e);
-                                    parse_fails += kanji_len;
                                 }
-                            }
 
-                            let stmt_res = conn.prepare(wanisql::INSERT_VOCAB);
-                            let vocab_len = vocab.len();
-                            match stmt_res {
-                                Ok(mut stmt) => {
-                                    for v in vocab {
-                                        match wanisql::store_vocab(v, &mut stmt) {
-                                            Err(e) => {
-                                                println!("Error inserting into vocab.\n{}", e);
-                                                parse_fails += 1;
-                                            }
-                                            Ok(_) => {},
+                                let vocab_len = vocab.len();
+                                for v in vocab {
+                                    match wanisql::store_vocab(v, &mut tx) {
+                                        Err(_) => {
+                                            parse_fails += 1;
                                         }
+                                        Ok(_) => {},
                                     }
-                                },
-                                Err(e) => {
-                                    println!("Error preparing insert into vocab statement. Error: {}", e);
-                                    parse_fails += vocab_len;
                                 }
-                            }
 
-                            let stmt_res = conn.prepare(wanisql::INSERT_KANA_VOCAB);
-                            let kana_vocab_len = kana_vocab.len();
-                            match stmt_res {
-                                Ok(mut stmt) => {
-                                    for v in kana_vocab {
-                                        match wanisql::store_kana_vocab(v, &mut stmt) {
-                                            Err(e) => {
-                                                println!("Error inserting into kana vocab.\n{}", e);
-                                                parse_fails += 1;
-                                            }
-                                            Ok(_) => {},
+                                let kana_vocab_len = kana_vocab.len();
+                                for v in kana_vocab {
+                                    match wanisql::store_kana_vocab(v, &mut tx) {
+                                        Err(_) => {
+                                            parse_fails += 1;
                                         }
+                                        Ok(_) => {},
                                     }
-                                },
-                                Err(e) => {
-                                    println!("Error preparing insert into kana vocab statement. Error: {}", e);
-                                    parse_fails += kana_vocab_len;
                                 }
-                            }
 
-                            let this_res_count = rad_len + kanji_len + vocab_len + kana_vocab_len - parse_fails;
-                            updated_resources += this_res_count;
-                            total_parse_fails += parse_fails;
-
-                            println!("Processed page with {} Resources and {} parse failures", this_res_count, parse_fails);
+                                Ok(SyncResult {
+                                    success_count: rad_len + kanji_len + vocab_len + kana_vocab_len - parse_fails,
+                                    fail_count: parse_fails,
+                                })
+                            });
+                            println!("start sql");
+                            let r = fut.await?;
+                            println!("end sql");
+                            updated_resources += r.success_count;
+                            total_parse_fails += r.fail_count;
                         },
                         _ => {
                             println!("Unexpected data returned while updating resources cache: {:?}", wr.data)
@@ -540,37 +533,72 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
             }
         }
 
-        println!("Updated Resources: {}", updated_resources);
-        if total_parse_fails > 0 {
-            println!("Parse Failures: {}", total_parse_fails);
-        }
-
         if let Some(h) = headers {
-            if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED)
-            {
+            if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED) {
                 if let Ok(t) = tag.to_str() {
-                    update_cache(Some(t), CACHE_TYPE_SUBJECTS, last_request_time, &conn).unwrap();
+                    update_cache(Some(t), CACHE_TYPE_SUBJECTS, last_request_time, &conn).await?;
                 }
                 else {
-                    update_cache(None, CACHE_TYPE_SUBJECTS, last_request_time, &conn).unwrap();
+                    update_cache(None, CACHE_TYPE_SUBJECTS, last_request_time, &conn).await?;
                 }
             }
         }
+
+        return Ok(SyncResult {
+            success_count: updated_resources,
+            fail_count: total_parse_fails,
+        });
     }
 
-    let conn = setup_connection(&args);
+    let web_config = get_web_config(&args);
+    if let Err(e) = web_config {
+        println!("{}", e);
+        return;
+    }
+    let web_config = web_config.unwrap();
+
+    let conn = setup_async_connection(&args).await;
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
-            sync(&args, &c, ignore_cache).await;
-            c.close().unwrap();
+            let c_infos = get_all_cache_infos(&c, ignore_cache).await;
+            if let Err(e) = c_infos {
+                println!("Error fetching cache infos. Error: {}", e);
+                return;
+            }
+            let mut c_infos = c_infos.unwrap();
+
+            let subj_future = sync_subjects(&c, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()}));
+            let ass_future = sync_assignments(&c, &web_config, c_infos.remove(&CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo { id: CACHE_TYPE_ASSIGNMENTS, ..Default::default()}));
+            let res = join![subj_future, ass_future];
+
+            match res.0 {
+                Ok(sync_res) => {
+                    println!("Synced Subjects: {}, Errors: {}", sync_res.success_count, sync_res.fail_count);
+                },
+                Err(e) => {
+                    println!("Error syncing subjects: {}", e);
+                },
+            };
+            match res.1 {
+                Ok(sync_res) => {
+                    println!("Synced Assignments: {}, Errors: {}", sync_res.success_count, sync_res.fail_count);
+                },
+                Err(e) => {
+                    println!("Error syncing assignments: {}", e);
+                },
+            };
         },
     };
 }
 
-fn update_cache(last_modified: Option<&str>, cache_type: usize, last_request_time: DateTime<Utc>, conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute("update cache_info set last_modified = ?1, updated_after = ?2, etag = ?3 where id = ?4;", params![last_modified, &last_request_time.to_rfc3339(), Option::<String>::None, cache_type])?;
-    Ok(())
+async fn update_cache(last_modified: Option<&str>, cache_type: usize, last_request_time: DateTime<Utc>, conn: &AsyncConnection) -> Result<(), tokio_rusqlite::Error> {
+    let last_modified = if let Some(lm) = last_modified { Some(lm.to_owned()) } else { None };
+    let last_request_time = last_request_time.to_rfc3339();
+    return conn.call(move |c| {
+        c.execute("update cache_info set last_modified = ?1, updated_after = ?2, etag = ?3 where id = ?4;", params![last_modified, &last_request_time, Option::<String>::None, cache_type])?;
+        Ok(())
+    }).await;
 }
 
 fn command_init(args: &Args) {
@@ -630,8 +658,7 @@ async fn command_test_subject(args: &Args) {
     }
 
     let web_config = web_config.unwrap();
-    let client = Client::new();
-    let response = client
+    let response = web_config.client
         .get("https://api.wanikani.com/v2/subjects")
         .header("Wanikani-Revision", &web_config.revision)
         .query(&[("levels", "5")])
@@ -654,7 +681,9 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
             match r.status() {
                 StatusCode::OK => {
                     let headers = r.headers().to_owned();
+                    println!("start parse");
                     let wani = r.json::<WaniResp>().await;
+                    println!("end parse");
                     match wani {
                         Err(s) => Err(format!("Error parsing HTTP 200 response: {}", s)),
                         Ok(w) => {
@@ -695,8 +724,7 @@ async fn command_summary(args: &Args) {
         return;
     }
     let web_config = web_config.unwrap();
-    let client = Client::new();
-    let response = client
+    let response = web_config.client
         .get("https://api.wanikani.com/v2/summary")
         .header("Wanikani-Revision", web_config.revision)
         .bearer_auth(web_config.auth)
@@ -744,7 +772,7 @@ fn test_handle_wani_resp(w: WaniResp) -> () {
     }
 }
 
-fn setup_connection(args: &Args) -> Result<Connection, WaniError> {
+fn get_db_path(args: &Args) -> Result<PathBuf, WaniError> {
     let mut datapath = PathBuf::new();
     if let Some(dpath) = &args.datapath {
         datapath.push(dpath);
@@ -770,8 +798,15 @@ fn setup_connection(args: &Args) -> Result<Connection, WaniError> {
 
     let mut db_path = PathBuf::from(&datapath);
     db_path.push("wani_cache.db");
+    return Ok(db_path);
+}
 
-    match Connection::open(&db_path) {
+async fn setup_async_connection(args: &Args) -> Result<AsyncConnection, WaniError> {
+    Ok(AsyncConnection::open(&get_db_path(args)?).await?)
+}
+
+fn setup_connection(args: &Args) -> Result<Connection, WaniError> {
+    match Connection::open(&get_db_path(args)?) {
         Ok(c) => Ok(c),
         Err(e) => Err(WaniError::Generic(format!("{}", e))),
     }
@@ -837,6 +872,7 @@ fn get_web_config(args: &Args) -> Result<WaniWebConfig, WaniError> {
     }
 
     return Ok(WaniWebConfig { 
+        client: Client::new(),
         auth,
         revision: "20170710".to_owned()
     });

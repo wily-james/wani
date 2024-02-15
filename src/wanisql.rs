@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::Statement;
+use rusqlite::Transaction;
 
 use crate::{wanidata::{self, AuxMeaning, ContextSentence, PronunciationAudio, VocabReading}, WaniError};
 
@@ -66,7 +66,7 @@ pub(crate) fn parse_assignment(r: &rusqlite::Row<'_>) -> Result<wanidata::Assign
     });
 }
 
-pub(crate) fn store_assignment(r: wanidata::Assignment, stmt: &mut Statement<'_>) -> Result<usize, rusqlite::Error>
+pub(crate) fn store_assignment(r: wanidata::Assignment, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
 {
     let subj_type: usize = r.data.subject_type.into();
     let p = rusqlite::params!(
@@ -79,7 +79,7 @@ pub(crate) fn store_assignment(r: wanidata::Assignment, stmt: &mut Statement<'_>
         r.data.subject_id,
         subj_type,
         );
-    return stmt.execute(p);
+    return stmt.execute(INSERT_ASSIGNMENT, p);
 }
 
 pub(crate) const CREATE_RADICALS_TBL: &str = "create table if not exists radicals (
@@ -132,7 +132,7 @@ pub(crate) const SELECT_ALL_RADICALS: &str = "select
                                       characters,
                                       character_images from radicals;";
 
-pub(crate) fn store_radical(r: wanidata::Radical, stmt: &mut Statement<'_>) -> Result<usize, rusqlite::Error>
+pub(crate) fn store_radical(r: wanidata::Radical, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
 {
     let p = rusqlite::params!(
         format!("{}", r.id),
@@ -150,7 +150,7 @@ pub(crate) fn store_radical(r: wanidata::Radical, stmt: &mut Statement<'_>) -> R
         if let Some(chars) = r.data.characters { Some(chars) } else { None },
         serde_json::to_string(&r.data.character_images).unwrap(),
         );
-    return stmt.execute(p);
+    return stmt.execute(INSERT_RADICALS, p);
 }
 
 pub(crate) fn parse_radical(r: &rusqlite::Row<'_>) -> Result<wanidata::Radical, WaniError> {
@@ -244,7 +244,7 @@ pub(crate) const SELECT_ALL_KANJI: &str = "select id,
                              readings,
                              visually_similar_subject_ids from kanji;";
 
-pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Statement<'_>) -> Result<usize, rusqlite::Error>
+pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
 {
     let p = rusqlite::params!(
         format!("{}", k.id),
@@ -267,7 +267,7 @@ pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Statement<'_>) -> Resul
         serde_json::to_string(&k.data.readings).unwrap(),
         serde_json::to_string(&k.data.visually_similar_subject_ids).unwrap(),
         );
-    return stmt.execute(p);
+    return stmt.execute(INSERT_KANJI, p);
 }
 
 pub(crate) fn parse_kanji(k: &rusqlite::Row<'_>) -> Result<wanidata::Kanji, WaniError> {
@@ -363,7 +363,7 @@ pub(crate) const SELECT_ALL_VOCAB: &str = "select id,
                              readings,
                              reading_mnemonic from vocab;";
 
-pub(crate) fn store_vocab(v: wanidata::Vocab, stmt: &mut Statement<'_>) -> Result<usize, rusqlite::Error>
+pub(crate) fn store_vocab(v: wanidata::Vocab, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
 {
     let p = rusqlite::params!(
         format!("{}", v.id),
@@ -385,7 +385,7 @@ pub(crate) fn store_vocab(v: wanidata::Vocab, stmt: &mut Statement<'_>) -> Resul
         serde_json::to_string(&v.data.readings).unwrap(),
         v.data.reading_mnemonic
         );
-    return stmt.execute(p);
+    return stmt.execute(INSERT_VOCAB, p);
 }
 
 pub(crate) fn parse_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::Vocab, WaniError> {
@@ -455,7 +455,7 @@ pub(crate) const INSERT_KANA_VOCAB: &str = "replace into kana_vocab
                              pronunciation_audios)
                             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
 
-pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Statement<'_>) -> Result<usize, rusqlite::Error>
+pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
 {
     let p = rusqlite::params!(
         format!("{}", v.id),
@@ -474,7 +474,7 @@ pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Statement<'_>)
         serde_json::to_string(&v.data.parts_of_speech).unwrap(),
         serde_json::to_string(&v.data.pronunciation_audios).unwrap()
         );
-    return stmt.execute(p);
+    return stmt.execute(INSERT_KANA_VOCAB, p);
 }
 
 pub(crate) const SELECT_ALL_KANA_VOCAB: &str = "select id,
