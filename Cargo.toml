@@ -21,3 +21,4 @@ rand = "0.8.5"
 itertools = "0.12.1"
 rodio = { version = "0", features = ["symphonia-all", "default"] }
 wana_kana = "3"
+image_ascii = "0.1.1"

@@ -1,7 +1,7 @@
 mod wanidata;
 mod wanisql;
 
-use crate::wanidata::{Assignment, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
+use crate::wanidata::{Assignment, PronunciationAudio, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -825,77 +825,113 @@ async fn command_review(args: &Args) {
                 return;
             }
 
+            let image_cache = get_image_cache(&args);
+            if let Err(e) = image_cache {
+                println!("{}", e);
+                return;
+            }
+
             let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config, &p_config).await;
         },
     };
 }
 
 async fn play_audio_for_subj(subject: &Subject, audio_cache: &PathBuf, web_config: &WaniWebConfig, term: &Term) -> Result<(), WaniError> {
-    let audio = match subject {
-        Subject::Radical(r) => (r.id, None),
-        Subject::Kanji(k) => (k.id, None),
-        Subject::Vocab(d) => (d.id, d.data.pronunciation_audios.iter().find_or_last(|a| a.content_type != "audio/mpeg")),
-        Subject::KanaVocab(d) => (d.id, d.data.pronunciation_audios.iter().find_or_last(|a| a.content_type != "audio/mpeg")),
-    };
-
-    if let Some(a) = audio.1 {
+    fn get_audio_path(audio: &PronunciationAudio, audio_cache: &PathBuf, id: i32) -> Option<PathBuf> {
         let ext;
         const MPEG: &str = "audio/mpeg";
         const OGG: &str = "audio/ogg";
         const WEBM: &str = "audio/webm";
-        if a.content_type == MPEG {
+        if audio.content_type == MPEG {
             ext = Some(".mpeg");
         }
-        else if a.content_type == OGG {
+        else if audio.content_type == OGG {
             ext = Some(".ogg");
         }
-        else if a.content_type == WEBM {
+        else if audio.content_type == WEBM {
             ext = Some(".webm");
         }
         else {
             ext = None;
         }
 
-        if let Some(ext) = ext {
-            let id = audio.0;
-            let mut audio_path = audio_cache.clone();
-            audio_path.push(format!("{}_0{}", id, ext));
+        if let None = ext {
+            return None;
+        }
+        let ext = ext.unwrap();
 
-            if let Err(_) = File::open(&audio_path) {
-                let request = web_config.client
-                    .get(&a.url);
-                match request.send().await {
-                    Err(_) => {
-                        println!("Error fetching audio from url: {}", a.url);
-                    },
-                    Ok(request) => {
-                        if request.status() != reqwest::StatusCode::OK {
-                            println!("Error fetching audio. HTTP {}", request.status());
+        let mut audio_path = audio_cache.clone();
+        audio_path.push(format!("{}_0{}", id, ext));
+        Some(audio_path)
+    }
+
+    async fn try_download_audio(audio: &PronunciationAudio, audio_path: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
+        let request = web_config.client
+            .get(&audio.url);
+        match request.send().await {
+            Err(_) => {
+                Err(WaniError::Generic(format!("Error fetching audio from url: {}", audio.url)))
+            },
+            Ok(request) => {
+                if request.status() != reqwest::StatusCode::OK {
+                    Err(WaniError::Generic(format!("Error fetching audio. HTTP {}", request.status())))
+                }
+                else {
+                    if let Ok(f) = tokio::fs::File::create(&audio_path).await {
+                        let mut reader = tokio::io::BufWriter::new(f);
+                        let res = reader.write_all_buf(&mut request.bytes().await?).await;
+                        if let Err(e) = res {
+                            Err(WaniError::Generic(format!("Error downloading audio. {}", e)))
                         }
                         else {
-                            if let Ok(f) = tokio::fs::File::create(&audio_path).await {
-                                let mut reader = tokio::io::BufWriter::new(f);
-                                let res = reader.write_all_buf(&mut request.bytes().await?).await;
-                                if let Err(e) = res {
-                                    println!("Error downloading audio. {}", e);
-                                    term.read_key()?;
-                                }
-                            }
+                            Ok(())
                         }
-                    },
+                    }
+                    else {
+                        Err(WaniError::Generic("Error opening file to save audio".into()))
+                    }
                 }
-            }
+            },
+        }
+    }
 
-            let res = play_audio(&audio_path);
-            if let Err(_) = res {
-                if let Err(_) = tokio::fs::remove_file(&audio_path).await {
-                    println!("Audio file did not download successfully, and failed to clean up the broken file. You should delete the file at: {}", audio_path.display());
-                    term.read_key()?;
+    let (id, audios) = match subject {
+        Subject::Radical(r) => (r.id, None),
+        Subject::Kanji(k) => (k.id, None),
+        Subject::Vocab(d) => (d.id, Some(&d.data.pronunciation_audios)),
+        Subject::KanaVocab(d) => (d.id, Some(&d.data.pronunciation_audios)),
+    };
+    if let None = audios {
+        return Ok(());
+    }
+
+    let audios = audios.unwrap();
+    let audio_paths = audios.iter()
+        .map(|a| get_audio_path(a, audio_cache, id))
+        .collect::<Vec<_>>();
+
+    for i in 0..audio_paths.len() {
+        if let Some(path) = &audio_paths[i] {
+            let res = play_audio(&path);
+            if let Ok(_) = res {
+                return Ok(());
+            }
+        }
+    }
+
+    for i in 0..audios.len() {
+        if let Some(path) = &audio_paths[i] {
+            let res = try_download_audio(&audios[i], &path, web_config).await;
+            if let Ok(_) = res {
+                let play_res = play_audio(&path);
+                if let Ok(_) = play_res {
+                    return Ok(());
                 }
             }
         }
     }
-    Ok(())
+
+    return Ok(());
 }
 
 fn split_str_by_len(s: &str, l: usize) -> Vec<String> {
@@ -1464,6 +1500,21 @@ fn test_handle_wani_resp(w: WaniResp) -> () {
             println!("Unexpected response type");
         }
     }
+}
+
+fn get_image_cache(args: &Args) -> Result<PathBuf, WaniError> {
+    let mut db_path = get_db_path(args)?;
+    db_path.pop();
+    db_path.push("images");
+    
+    if !Path::exists(&db_path)
+    {
+        if let Err(s) = fs::create_dir(&db_path) {
+            return Err(WaniError::Generic(format!("Could not create image cache path at {}\nError: {}", db_path.display(), s)));
+        }
+    }
+
+    return Ok(db_path);
 }
 
 fn get_audio_path(args: &Args) -> Result<PathBuf, WaniError> {
