@@ -1194,9 +1194,9 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
             }
         },
 
-        // 0 - kanji meaning, mnemonic, hint, meaning/reading hint, user note
+        // 0 - kanji meaning, mnemonic, TODO hint, meaning/reading hint, user note
         // TODO 1 - user synonym, user note
-        // 1 - kanji reading, mnemonic, hint
+        // 1 - kanji reading, mnemonic, TODO hint
         // 2 - visually similar kanji
         // 3 - found in vocab
         Subject::Kanji(k) => {
@@ -1259,51 +1259,123 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
             }
         },
 
-        // 0 - vocab meaning/reading, mnemonic, user synonym, meaning/reading hint, user note, part
-        //   of speech
-        // 1 - vocab reading/meaning...
-        // 2 - visually similar kanji
-        // 3 - found in vocab
-        // 4 - Context Pt 1:
+        // 0 - vocab meaning, mnemonic, TODO hint, part of speech
+        // TODO 1 - user synonym, user note
+        // 1 - vocab reading, mnemonic, TODO hint
+        // TODO 2 - Context Pt 1:
         //      - patterns for use
         //      - common word combinations
-        // 5 - Context Pt 2:
+        // 2 - Context Pt 2:
         //      - context sentences
-        // 6 - Kanji composition
+        // 3 - Kanji composition
         Subject::Vocab(v) => {
-            if is_meaning {
-                let mut lines = vec![];
-                let meanings = v.primary_meanings()
-                    .join(", ");
-                if meanings.len() > 0 {
-                    lines.push(pad_str(&meanings, width, align, None).to_string());
-                }
-                let alt_meanings = v.alt_meanings()
-                    .join(", ");
-                if alt_meanings.len() > 0 {
-                    lines.push(pad_str(&alt_meanings, width, align, None).to_string());
-                }
-                lines.push("---".to_owned());
-                let mnemonic = wanidata::format_wani_text(&v.data.meaning_mnemonic, &wfmt_args);
-                split_str_by_len(&mnemonic, text_width, &mut lines);
-                lines
-            }
-            else {
-                let mut lines = vec![];
-                let readings = v.primary_readings()
-                    .join(", ");
-                if readings.len() > 0 {
-                    lines.push(pad_str(&readings, width, align, None).to_string());
-                }
-                let alt_readings = v.alt_readings()
-                    .join(", ");
-                if alt_readings.len() > 0 {
-                    lines.push(pad_str(&alt_readings, width, align, None).to_string());
-                }
-                lines.push("---".to_owned());
-                let mnemonic = wanidata::format_wani_text(&v.data.reading_mnemonic, &wfmt_args);
-                split_str_by_len(&mnemonic, text_width, &mut lines);
-                lines
+            let num_choices = 4;
+            let info_status = info_status % num_choices;
+
+            // When we are reviewing "reading":
+            // swap the order of the "meaning" and "reading" screens
+            let info_status = if is_meaning { info_status } else { 
+                match info_status {
+                    0 => 1,
+                    1 => 0,
+                    n => n,
+                } 
+            };
+            match info_status {
+                0 => {
+                    let mut lines = vec![];
+                    let meanings = v.primary_meanings()
+                        .join(", ");
+                    if meanings.len() > 0 {
+                        lines.push(pad_str(&meanings, width, align, None).to_string());
+                    }
+                    let alt_meanings = v.alt_meanings()
+                        .join(", ");
+                    if alt_meanings.len() > 0 {
+                        lines.push(pad_str(&alt_meanings, width, align, None).to_string());
+                    }
+                    if v.data.parts_of_speech.len() > 0 {
+                        lines.push("---".to_owned());
+                        lines.push(pad_str(&v.data.parts_of_speech.join(", "), width, align, None).to_string())
+                    }
+                    lines.push("---".to_owned());
+                    let mnemonic = wanidata::format_wani_text(&v.data.meaning_mnemonic, &wfmt_args);
+                    split_str_by_len(&mnemonic, text_width, &mut lines);
+                    lines
+                },
+                1 => {
+                    let mut lines = vec![];
+                    let readings = v.primary_readings()
+                        .join(", ");
+                    if readings.len() > 0 {
+                        lines.push(pad_str(&readings, width, align, None).to_string());
+                    }
+                    let alt_readings = v.alt_readings()
+                        .join(", ");
+                    if alt_readings.len() > 0 {
+                        lines.push(pad_str(&alt_readings, width, align, None).to_string());
+                    }
+                    lines.push("---".to_owned());
+                    let mnemonic = wanidata::format_wani_text(&v.data.reading_mnemonic, &wfmt_args);
+                    split_str_by_len(&mnemonic, text_width, &mut lines);
+                    lines
+                },
+                2 => {
+                    let mut lines = vec![];
+                    let left = console::Alignment::Left;
+                    lines.push(pad_str("Context Sentences:", width, left, None).to_string());
+                    for sent in &v.data.context_sentences {
+                        //lines.push(pad_str("English:", width, left, None).to_string());
+                        let mut sent_lines = vec![];
+                        split_str_by_len(&sent.ja, text_width, &mut sent_lines);
+                        for ele in &sent_lines {
+                            let mut line = String::from("\t");
+                            line.push_str(&ele);
+                            lines.push(pad_str(&line, width, left, None).to_string());
+                        }
+                        sent_lines.clear();
+                        //lines.push(pad_str("日本語:", width, left, None).to_string());
+                        split_str_by_len(&sent.en, text_width, &mut sent_lines);
+                        for ele in sent_lines {
+                            let mut line = String::from("\t");
+                            line.push_str(&ele);
+                            lines.push(pad_str(&line, width, left, None).to_string());
+                        }
+                        lines.push("".into());
+                    }
+                    lines
+                },
+                3 => {
+                    let mut lines = vec![];
+                    lines.push(pad_str(&"Kanji Composition:", width, align, None).to_string());
+                    match lookup_kanji(conn, v.data.component_subject_ids.clone()).await {
+                        Ok(kanji) => {
+                            let mut i = 0;
+                            let kanji_in_line = 3;
+                            while i < kanji.len() {
+                                let mut j = 0;
+                                let mut kanji_line = vec![];
+                                while i < kanji.len() && j < kanji_in_line {
+                                    kanji_line.push(format!("{}: {}", 
+                                                           &kanji[i].data.characters, 
+                                                           &kanji[i].primary_meanings()
+                                                           .map(|m| m.to_owned())
+                                                           .next()
+                                                           .unwrap_or("".to_owned())));
+                                    i += 1;
+                                    j += 1;
+                                }
+                                lines.push(pad_str(&kanji_line.iter().join(", "), width, align, None).to_string())
+                            }
+
+                        },
+                        Err(e) => {
+                            lines.push(format!("Error looking up kanji: {}", e));
+                        }
+                    };
+                    lines
+                },
+                _ => { vec![] },
             }
         },
         Subject::KanaVocab(kv) => {
@@ -1639,7 +1711,7 @@ async fn play_audio_for_subj(id: i32, audios: Vec<PronunciationAudio>, audio_cac
     return Ok(());
 }
 
-fn split_str_by_len(s: &str, l: usize, v: &mut Vec<String>)  {
+fn split_str_by_len(s: &str, l: usize, v: &mut Vec<String>) {
     let mut curr = vec![];
     let mut curr_len = 0;
 
