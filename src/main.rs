@@ -283,6 +283,43 @@ async fn command_review(args: &Args) {
             let width = 80;
             let text_width = 50;
             let align = console::Alignment::Center;
+            let blue_tag = format!("\x1b[{}m", 4 + 40);
+            let red_tag = format!("\x1b[{}m", 1 + 40);
+            let magenta_tag = format!("\x1b[{}m", 5 + 40);
+            let cyan_tag = format!("\x1b[{}m", 6 + 40);
+            let green_tag = format!("\x1b[{}m", 2 + 40);
+            let wfmt_args;
+            if term.features().colors_supported() {
+                wfmt_args = wanidata::WaniFmtArgs {
+                    radical_args: wanidata::WaniTagArgs {
+                        open_tag: &blue_tag,
+                        close_tag: "\x1b[0m",
+                    },
+                    kanji_args: wanidata::WaniTagArgs {
+                        open_tag: &red_tag,
+                        close_tag: "\x1b[0m",
+                    },
+                    vocab_args: wanidata::WaniTagArgs {
+                        open_tag: &magenta_tag,
+                        close_tag: "\x1b[0m",
+                    },
+                    meaning_args: wanidata::WaniTagArgs {
+                        open_tag: &cyan_tag,
+                        close_tag: "\x1b[0m",
+                    },
+                    reading_args: wanidata::WaniTagArgs {
+                        open_tag: &cyan_tag,
+                        close_tag: "\x1b[0m",
+                    },
+                    ja_args: wanidata::WaniTagArgs {
+                        open_tag: &green_tag,
+                        close_tag: "\x1b[0m",
+                    },
+                };
+            }
+            else {
+                wfmt_args = wanidata::EMPTY_ARGS;
+            }
 
             assignments.reverse();
             let total_reviews = assignments.len();
@@ -307,7 +344,7 @@ async fn command_review(args: &Args) {
             }
 
             while !batch.is_empty() {
-                //batch.shuffle(rng);
+                batch.shuffle(rng);
                 let assignment = batch.last().unwrap();
                 let review = reviews.get_mut(&assignment.id).unwrap();
                 let subject = subjects.get(&assignment.data.subject_id);
@@ -392,26 +429,7 @@ async fn command_review(args: &Args) {
 
                     let guess = input.to_lowercase();
 
-                    let answer_result = match subject {
-                        Subject::KanaVocab(v) => wanidata::is_meaning_correct(&v.data.meanings, &guess),
-                        Subject::Radical(r) => wanidata::is_meaning_correct(&r.data.meanings, &guess),
-                        Subject::Kanji(k) => {
-                            if is_meaning {
-                                wanidata::is_meaning_correct(&k.data.meanings, &guess)
-                            }
-                            else {
-                                wanidata::is_reading_correct(&k.data.readings, &guess)
-                            }
-                        },
-                        Subject::Vocab(v) => {
-                            if is_meaning {
-                                wanidata::is_meaning_correct(&v.data.meanings, &guess)
-                            }
-                            else {
-                                wanidata::is_vocab_reading_correct(&v.data.readings, &guess)
-                            }
-                        },
-                    };
+                    let answer_result = wanidata::is_correct_answer(subject, &guess, is_meaning);
 
                     // Tuple (retry, toast, correct)
                     let tuple = match answer_result {
@@ -496,26 +514,32 @@ async fn command_review(args: &Args) {
                         if showing_info {
                             let lines = match subject {
                                 Subject::Radical(r) => {
-                                    split_str_by_len(&r.data.meaning_mnemonic, text_width)
+                                    let mnemonic = wanidata::format_wani_text(&r.data.meaning_mnemonic, &wfmt_args);
+                                    split_str_by_len(&mnemonic, text_width)
                                 },
                                 Subject::Kanji(k) => {
                                     if is_meaning {
-                                        split_str_by_len(&k.data.meaning_mnemonic, text_width)
+                                        let mnemonic = wanidata::format_wani_text(&k.data.meaning_mnemonic, &wfmt_args);
+                                        split_str_by_len(&mnemonic, text_width)
                                     }
                                     else {
-                                        split_str_by_len(&k.data.reading_mnemonic, text_width)
+                                        let mnemonic = wanidata::format_wani_text(&k.data.reading_mnemonic, &wfmt_args);
+                                        split_str_by_len(&mnemonic, text_width)
                                     }
                                 },
                                 Subject::Vocab(v) => {
                                     if is_meaning {
-                                        split_str_by_len(&v.data.meaning_mnemonic, text_width)
+                                        let mnemonic = wanidata::format_wani_text(&v.data.meaning_mnemonic, &wfmt_args);
+                                        split_str_by_len(&mnemonic, text_width)
                                     }
                                     else {
-                                        split_str_by_len(&v.data.reading_mnemonic, text_width)
+                                        let mnemonic = wanidata::format_wani_text(&v.data.reading_mnemonic, &wfmt_args);
+                                        split_str_by_len(&mnemonic, text_width)
                                     }
                                 },
                                 Subject::KanaVocab(kv) => {
-                                    split_str_by_len(&kv.data.meaning_mnemonic, text_width)
+                                    let mnemonic = wanidata::format_wani_text(&kv.data.meaning_mnemonic, &wfmt_args);
+                                    split_str_by_len(&mnemonic, text_width)
                                 },
                             };
                             for line in &lines {
@@ -705,11 +729,27 @@ async fn command_review(args: &Args) {
 }
 
 fn split_str_by_len(s: &str, l: usize) -> Vec<String> {
-    s.chars()
-        .chunks(l)
-        .into_iter()
-        .map(|chunk| chunk.collect::<String>())
-        .collect::<Vec<String>>()
+    let mut v = vec![];
+    let mut curr = vec![];
+    let mut curr_len = 0;
+
+    for word in s.split_whitespace() {
+        let this_len = word.chars().count();
+        if curr_len + this_len > l {
+            v.push(curr.join(" ").to_string());
+            curr = vec![];
+            curr_len = 0;
+        }
+
+        curr.push(word);
+        curr_len += this_len;
+    }
+
+    if curr_len > 0 {
+        v.push(curr.join(" ").to_string());
+    }
+
+    v
 }
 
 async fn select_data<T, F, P>(sql: &'static str, c: &AsyncConnection, parse_fn: F, params: P) -> Result<Vec<T>, tokio_rusqlite::Error> 

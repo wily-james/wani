@@ -384,7 +384,22 @@ pub enum AnswerResult {
     MatchesNonAcceptedAnswer,
 }
 
-pub fn is_correct_answer(subject: Subject, guess: &str, is_meaning: bool) -> AnswerResult {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AuxMeaning {
+    pub r#type: AuxMeaningType,
+    pub meaning: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum AuxMeaningType
+{
+    #[serde(rename="whitelist")]
+    Whitelist,
+    #[serde(rename="blacklist")]
+    Blacklist
+}
+
+pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool) -> AnswerResult {
     match subject {
         Subject::KanaVocab(v) => is_meaning_correct(&v.data.meanings, &guess),
         Subject::Radical(r) => is_meaning_correct(&r.data.meanings, &guess),
@@ -449,17 +464,123 @@ pub fn is_meaning_correct(meanings: &Vec<Meaning>, guess: &str) -> AnswerResult 
     return AnswerResult::Incorrect;
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct AuxMeaning {
-    pub r#type: AuxMeaningType,
-    pub meaning: String,
+pub struct WaniFmtArgs<'a> {
+    pub radical_args: WaniTagArgs<'a>,
+    pub kanji_args: WaniTagArgs<'a>,
+    pub vocab_args: WaniTagArgs<'a>,
+    pub meaning_args: WaniTagArgs<'a>,
+    pub reading_args: WaniTagArgs<'a>,
+    pub ja_args: WaniTagArgs<'a>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum AuxMeaningType
-{
-    #[serde(rename="whitelist")]
-    Whitelist,
-    #[serde(rename="blacklist")]
-    Blacklist
+pub struct WaniTagArgs<'a> {
+    pub open_tag: &'a str,
+    pub close_tag: &'a str,
+}
+
+pub const EMPTY_ARGS: WaniFmtArgs = WaniFmtArgs {
+    radical_args: WaniTagArgs { 
+        open_tag: "",
+        close_tag: "",
+    },
+    kanji_args: WaniTagArgs { 
+        open_tag: "",
+        close_tag: "",
+    },
+    vocab_args: WaniTagArgs { 
+        open_tag: "",
+        close_tag: "",
+    },
+    meaning_args: WaniTagArgs { 
+        open_tag: "",
+        close_tag: "",
+    },
+    reading_args: WaniTagArgs { 
+        open_tag: "",
+        close_tag: "",
+    },
+    ja_args: WaniTagArgs { 
+        open_tag: "",
+        close_tag: "",
+    },
+};
+
+pub fn format_wani_text(s: &str, args: &WaniFmtArgs) -> String {
+    let s = s.replace("<radical>", args.radical_args.open_tag);
+    let s = s.replace("</radical>", args.radical_args.close_tag);
+    let s = s.replace("<kanji>", args.kanji_args.open_tag);
+    let s = s.replace("</kanji>", args.kanji_args.close_tag);
+    let s = s.replace("<vocabulary>", args.vocab_args.open_tag);
+    let s = s.replace("</vocabulary>", args.vocab_args.close_tag);
+    let s = s.replace("<reading>", args.reading_args.open_tag);
+    let s = s.replace("</reading>", args.reading_args.close_tag);
+    let s = s.replace("<ja>", args.ja_args.open_tag);
+    let s = s.replace("</ja>", args.ja_args.close_tag);
+    let s = s.replace("<meaning>", args.meaning_args.open_tag);
+    s.replace("</meaning>", args.meaning_args.close_tag)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_wani_text, WaniFmtArgs, EMPTY_ARGS};
+
+    const TEST_ARGS: WaniFmtArgs = WaniFmtArgs {
+        radical_args: super::WaniTagArgs { 
+            open_tag: "[my_rad]",
+            close_tag: "[/my_rad]",
+        },
+        kanji_args: super::WaniTagArgs { 
+            open_tag: "[my_kanji]",
+            close_tag: "[/my_kanji]",
+        },
+        vocab_args: super::WaniTagArgs { 
+            open_tag: "[my_vocab]",
+            close_tag: "[/my_vocab]",
+        },
+        meaning_args: super::WaniTagArgs { 
+            open_tag: "[my_meaning]",
+            close_tag: "[/my_meaning]",
+        },
+        reading_args: super::WaniTagArgs { 
+            open_tag: "[my_reading]",
+            close_tag: "[/my_reading]",
+        },
+        ja_args: super::WaniTagArgs { 
+            open_tag: "[my_ja]",
+            close_tag: "[/my_ja]",
+        },
+    };
+
+    #[test]
+    fn format_wani_text_no_tags_isnt_changed() {
+        let text = "hey there buddy, what is up!!<><hello></hello> swag\n未来";
+        let formatted = format_wani_text(text, &TEST_ARGS);
+        assert_eq!(text, &formatted);
+    }
+
+    #[test]
+    fn format_wani_text_tags_are_changed() {
+        let text = "this is a <radical>radical</radical>. This is a <kanji>kanji</kanji>.";
+        let expected = "this is a [my_rad]radical[/my_rad]. This is a [my_kanji]kanji[/my_kanji].";
+        let formatted = format_wani_text(text, &TEST_ARGS);
+        assert_eq!(expected, &formatted);
+
+        let text = "this is a <vocabulary>vocab</vocabulary>. This is a <meaning>meaning</meaning>.";
+        let expected = "this is a [my_vocab]vocab[/my_vocab]. This is a [my_meaning]meaning[/my_meaning].";
+        let formatted = format_wani_text(text, &TEST_ARGS);
+        assert_eq!(expected, &formatted);
+
+        let text = "this is a <reading>もうたべた</reading>. This is a <ja>漢字</ja>.";
+        let expected = "this is a [my_reading]もうたべた[/my_reading]. This is a [my_ja]漢字[/my_ja].";
+        let formatted = format_wani_text(text, &TEST_ARGS);
+        assert_eq!(expected, &formatted);
+    }
+
+    #[test]
+    fn format_wani_empty_args_clears_tags() {
+        let text = "this is a <radical>radical</radical>. This is a <kanji>kanji</kanji>.";
+        let expected = "this is a radical. This is a kanji.";
+        let formatted = format_wani_text(text, &EMPTY_ARGS);
+        assert_eq!(expected, &formatted);
+    }
 }
