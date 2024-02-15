@@ -1,4 +1,4 @@
-# Wani
+# wani
 
 ## A familiar WaniKani experience -- in the terminal
 
@@ -40,8 +40,7 @@ Add the following line to that file (replacing your_auth_token with your actual 
 auth: your_auth_token
 ```
 
-For more information about the wani config file, see:
-  - [CONFIGURATION](#configuration)
+For more information about the wani config file, see [CONFIGURATION](#configuration).
 
 ## USE
 

@@ -10,7 +10,6 @@ use std::io::BufReader;
 use std::io::Write;
 use std::ops::Deref;
 use std::str::FromStr;
-use std::time::Duration;
 use reqwest::header::HeaderValue;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
