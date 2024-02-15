@@ -249,6 +249,61 @@ fn command_query_radicals(args: &Args) {
     };
 }
 
+async fn command_review(args: &Args) {
+    let web_config = get_web_config(&args);
+
+    let conn = setup_async_connection(&args).await;
+    match conn {
+        Err(e) => println!("{}", e),
+        Ok(c) => {
+            if let Ok(wc) = web_config {
+                sync_all(&wc, &c, false).await;
+            }
+            
+            let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment).await;
+            if let Err(e) = assignments {
+                println!("Error loading assignments. Error: {}", e);
+                return;
+            };
+            let assignments = assignments.unwrap();
+            clear_screen();
+            println!("Correct: {}%, Done: {}, Remaining: {}", 100, 0, assignments.len());
+        },
+    };
+}
+
+fn clear_screen() {
+    print!("{esc}c", esc = 27 as char);
+}
+
+async fn select_data<T, F>(sql: &'static str, c: &AsyncConnection, parse_fn: F) -> Result<Vec<T>, tokio_rusqlite::Error> 
+where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_>) -> Result<T, WaniError> {
+    return c.call(move |c| { 
+        let stmt = c.prepare(sql);
+        match stmt {
+            Err(e) => {
+                return Err(tokio_rusqlite::Error::Rusqlite(e));
+            },
+            Ok(mut stmt) => {
+                match stmt.query_map([], |r| parse_fn(r)
+                                     .or_else
+                                     (|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                    Ok(radicals) => {
+                        let mut rads = vec![];
+                        for r in radicals {
+                            if let Ok(rad) = r {
+                                rads.push(rad);
+                            }
+                        }
+                        Ok(rads)
+                    },
+                    Err(e) => {Err(tokio_rusqlite::Error::Rusqlite(e))},
+                }
+            }
+        }
+    }).await;
+}
+
 fn command_cache_info(args: &Args) {
     let conn = setup_connection(&args);
     match conn {
@@ -315,11 +370,23 @@ async fn get_all_cache_infos(conn: &AsyncConnection, ignore_cache: bool) -> Resu
     }).await?)
 }
 
-async fn command_review(args: &Args) {
-    todo!()
+async fn command_sync(args: &Args, ignore_cache: bool) {
+    let web_config = get_web_config(&args);
+    if let Err(e) = web_config {
+        return;
+    }
+    let web_config = web_config.unwrap();
+
+    let conn = setup_async_connection(&args).await;
+    match conn {
+        Err(e) => println!("{}", e),
+        Ok(c) => {
+            sync_all(&web_config, &c, ignore_cache).await;
+        },
+    };
 }
 
-async fn command_sync(args: &Args, ignore_cache: bool) {
+async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cache: bool) {
     struct SyncResult {
         success_count: usize,
         fail_count: usize,
@@ -541,44 +608,31 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
         });
     }
 
-    let web_config = get_web_config(&args);
-    if let Err(e) = web_config {
-        println!("{}", e);
+    let c_infos = get_all_cache_infos(&conn, ignore_cache).await;
+    if let Err(e) = c_infos {
+        println!("Error fetching cache infos. Error: {}", e);
         return;
     }
-    let web_config = web_config.unwrap();
+    let mut c_infos = c_infos.unwrap();
 
-    let conn = setup_async_connection(&args).await;
-    match conn {
-        Err(e) => println!("{}", e),
-        Ok(c) => {
-            let c_infos = get_all_cache_infos(&c, ignore_cache).await;
-            if let Err(e) = c_infos {
-                println!("Error fetching cache infos. Error: {}", e);
-                return;
-            }
-            let mut c_infos = c_infos.unwrap();
+    let subj_future = sync_subjects(&conn, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()}));
+    let ass_future = sync_assignments(&conn, &web_config, c_infos.remove(&CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo { id: CACHE_TYPE_ASSIGNMENTS, ..Default::default()}));
+    let res = join![subj_future, ass_future];
 
-            let subj_future = sync_subjects(&c, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()}));
-            let ass_future = sync_assignments(&c, &web_config, c_infos.remove(&CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo { id: CACHE_TYPE_ASSIGNMENTS, ..Default::default()}));
-            let res = join![subj_future, ass_future];
-
-            match res.0 {
-                Ok(sync_res) => {
-                    println!("Synced Subjects: {}, Errors: {}", sync_res.success_count, sync_res.fail_count);
-                },
-                Err(e) => {
-                    println!("Error syncing subjects: {}", e);
-                },
-            };
-            match res.1 {
-                Ok(sync_res) => {
-                    println!("Synced Assignments: {}, Errors: {}", sync_res.success_count, sync_res.fail_count);
-                },
-                Err(e) => {
-                    println!("Error syncing assignments: {}", e);
-                },
-            };
+    match res.0 {
+        Ok(sync_res) => {
+            println!("Synced Subjects: {}, Errors: {}", sync_res.success_count, sync_res.fail_count);
+        },
+        Err(e) => {
+            println!("Error syncing subjects: {}", e);
+        },
+    };
+    match res.1 {
+        Ok(sync_res) => {
+            println!("Synced Assignments: {}, Errors: {}", sync_res.success_count, sync_res.fail_count);
+        },
+        Err(e) => {
+            println!("Error syncing assignments: {}", e);
         },
     };
 }
