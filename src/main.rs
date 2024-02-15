@@ -432,9 +432,7 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
 
             last_request_time = Utc::now();
             next_url = None;
-            println!("start request");
             let resp = request.send().await;
-            println!("got response");
             match parse_response(resp).await {
                 Ok(t) => {
                     let wr = t.0;
@@ -514,9 +512,7 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
                                     fail_count: parse_fails,
                                 })
                             });
-                            println!("start sql");
                             let r = fut.await?;
-                            println!("end sql");
                             updated_resources += r.success_count;
                             total_parse_fails += r.fail_count;
                         },
@@ -681,9 +677,7 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
             match r.status() {
                 StatusCode::OK => {
                     let headers = r.headers().to_owned();
-                    println!("start parse");
                     let wani = r.json::<WaniResp>().await;
-                    println!("end parse");
                     match wani {
                         Err(s) => Err(format!("Error parsing HTTP 200 response: {}", s)),
                         Ok(w) => {
