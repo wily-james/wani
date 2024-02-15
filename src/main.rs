@@ -747,7 +747,10 @@ async fn command_review(args: &Args) {
                         _ => {},
                     };
 
-                    kana_input = input.to_kana();
+                    kana_input = input.to_kana_with_opt(wana_kana::Options { 
+                        imemode: true,
+                        ..Default::default()
+                    });
                     vis_input = if is_meaning { &input } else { &kana_input };
                     let input_padded = pad_str(&vis_input, width, align, None);
                     print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_padded)?;
