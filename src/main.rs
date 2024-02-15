@@ -471,8 +471,11 @@ fn play_audio(audio_path: &PathBuf) -> Result<(), WaniError> {
     }
 }
 
-fn print_lesson_screen(term: &Term, char_line: &[String], meaning_line: &Option<String>) -> Result<(), WaniError> {
+fn print_lesson_screen(term: &Term, char_line: &[String], meaning_line: &Option<String>, rev_type: &ReviewType, width: usize) -> Result<(), WaniError> {
     term.clear_screen()?;
+    if let ReviewType::Lesson(subj_counts) = rev_type {
+        print_lesson_status(subj_counts, term, width)?;
+    }
     for line in char_line {
         term.write_line(line)?;
     }
@@ -484,22 +487,44 @@ fn print_lesson_screen(term: &Term, char_line: &[String], meaning_line: &Option<
 }
 
 // TODO - fix these statistics wrt multiple batches
-fn print_review_screen(term: &Term, stats: &ReviewStats, width: usize, align: console::Alignment, char_lines: &Vec<String>, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
+fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, width: usize, align: console::Alignment, char_lines: &Vec<String>, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
     term.clear_screen()?;
-    let correct_percentage = if stats.guesses == 0 { 100 } else { ((stats.guesses as f64 - stats.failed as f64) / stats.guesses as f64 * 100.0) as i32 };
-    term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", 
-                                     Emoji("\u{1F44D}", "Correct"), correct_percentage, 
-                                     Emoji("\u{2705}", "Done"), stats.done, 
-                                     Emoji("\u{1F4E9}", "Remaining"), stats.total_reviews - stats.done), 
-                            width, align, None).deref())?;
+
+    // Top line changes based on review type
+    match rev_type {
+        ReviewType::Review(stats) => {
+            let correct_percentage = if stats.guesses == 0 { 100 } else { ((stats.guesses as f64 - stats.failed as f64) / stats.guesses as f64 * 100.0) as i32 };
+            term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", 
+                                             Emoji("\u{1F44D}", "Correct"), correct_percentage, 
+                                             Emoji("\u{2705}", "Done"), stats.done, 
+                                             Emoji("\u{1F4E9}", "Remaining"), stats.total_reviews - stats.done), 
+                                    width, align, None).deref())?;
+        },
+
+        ReviewType::Lesson(subj_counts) => {
+            print_lesson_status(subj_counts, term, width)?;
+        },
+    }
+
     for char_line in char_lines {
         term.write_line(char_line)?;
     }
     term.write_line(pad_str(&format!("{}:", review_type_text), width, align, None).deref())?;
     term.write_line(input)?;
     if let Some(t) = toast {
-        term.write_line(pad_str(&format!("{} {}", Emoji("", "-"), t), width, align, None).deref())?;
+        term.write_line(pad_str(&format!("{} {}", "-", t), width, align, None).deref())?;
     }
+
+    Ok(())
+}
+
+fn print_lesson_status(subj_counts: &SubjectCounts, term: &Term, width: usize) -> Result<(), WaniError> {
+    let msg_emoji = Emoji("\u{1F4E9}", " ");
+    let line = &format!("R{}{} K{}{} V{}{}", 
+                        msg_emoji, subj_counts.radical_count,
+                        msg_emoji, subj_counts.kanji_count,
+                        msg_emoji, subj_counts.vocab_count);
+    term.write_line(pad_str(line, width, console::Alignment::Right, None).deref())?;
     Ok(())
 }
 
@@ -542,7 +567,7 @@ where I: Iterator<Item = &'a NewReview> {
             };
 
             let info = RequestInfo {
-                url: "https://api.wanikani.com/v2/reviews/",
+                url: "https://api.wanikani.com/v2/reviews/".to_owned(),
                 method: RequestMethod::Post,
                 json: Some(new_review),
                 query: None,
@@ -748,15 +773,16 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
         }
     }
 
+    let mut rev_type = ReviewType::Lesson(subject_counts);
     while assignments.len() > 0 {
         let mut batch = Vec::with_capacity(batch_size);
-        assignments.shuffle(&mut thread_rng());
+        //assignments.shuffle(&mut thread_rng());
         for i in (assignments.len() - batch_size..assignments.len()).rev() {
             batch.push(assignments.remove(i));
         }
 
         // TODO - do lesson batch
-        let _ = do_lesson_batch(batch, &subject_counts, &subjects_by_id, image_cache, web_config, c, &audio_tx).await;
+        let _ = do_lesson_batch(batch, &mut rev_type, &subjects_by_id, image_cache, web_config, c, &audio_tx, p_config, rate_limit).await;
     }
 
     audio_task.abort();
@@ -770,7 +796,7 @@ struct SubjectCounts {
     vocab_count: usize,
 }
 
-async fn do_lesson_batch(batch: Vec<Assignment>, subj_counts: &SubjectCounts, subjects_by_id: &HashMap<i32, Subject>, image_cache: &PathBuf, web_config: &WaniWebConfig, conn: &AsyncConnection, audio_tx: &Sender<AudioMessage>) -> Result<(), WaniError> {
+async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewType, subjects: &HashMap<i32, Subject>, image_cache: &PathBuf, web_config: &WaniWebConfig, conn: &AsyncConnection, audio_tx: &Sender<AudioMessage>, p_config: &ProgramConfig, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
     if batch.len() == 0 {
         return Ok(());
     }
@@ -789,8 +815,8 @@ async fn do_lesson_batch(batch: Vec<Assignment>, subj_counts: &SubjectCounts, su
         }
 
         let assignment = &batch[index];
-        let subject = subjects_by_id.get(&assignment.data.subject_id).unwrap();
-        let characters = get_chars_for_subj(&term, &subject, image_cache, radical_width, web_config).await;
+        let subject = subjects.get(&assignment.data.subject_id).unwrap();
+        let characters = get_chars_for_subj(&subject, image_cache, radical_width, web_config).await;
         let padded_chars = characters.iter().map(|l| pad_str(l, width, align, None));
         let char_line = padded_chars.map(|pc| match subject {
             Subject::Radical(_) => style(pc).white().on_blue().to_string(),
@@ -814,7 +840,7 @@ async fn do_lesson_batch(batch: Vec<Assignment>, subj_counts: &SubjectCounts, su
 
         let mut card_page = 0;
         'card: loop {
-            print_lesson_screen(&term, &char_line, &meaning_line)?;
+            print_lesson_screen(&term, &char_line, &meaning_line, subj_counts, width)?;
             let lines = get_lesson_info_lines(subject, card_page, &wfmt_args, text_width, conn, align, width).await;
             if let None = lines {
                 index += 1;
@@ -873,7 +899,62 @@ async fn do_lesson_batch(batch: Vec<Assignment>, subj_counts: &SubjectCounts, su
         }
     }
 
+    let now = Utc::now();
+    let mut reviews = HashMap::with_capacity(batch.len());
+    for a in &batch {
+        reviews.insert(a.id, wanidata::NewReview {
+            id: None,
+            assignment_id: a.id,
+            created_at: now,
+            incorrect_meaning_answers: 0,
+            incorrect_reading_answers: 0,
+            status: wanidata::ReviewStatus::NotStarted,
+            available_at: a.data.available_at,
+        });
+    }
+
+    do_reviews_inner(subjects, web_config, p_config, image_cache, &mut reviews, &mut batch, subj_counts, audio_tx, conn).await?;
+
+    let mut join_set = JoinSet::new();
+    for (_, review) in reviews {
+        if let ReviewStatus::Done = review.status {
+            let started_at = review.created_at.to_rfc3339();
+            let url = format!("https://api.wanikani.com/v2/assignments/{}/start", review.assignment_id);
+            let info = RequestInfo {
+                url,
+                method: RequestMethod::Put,
+                json: Some(serde_json::json!({
+                    "started_at": started_at,
+                })),
+                ..Default::default()
+            };
+
+            let rate_limit = rate_limit.clone();
+            let web_config = web_config.clone();
+            join_set.spawn(async move {
+                return send_throttled_request(info, rate_limit, web_config).await
+            });
+        }
+
+        while let Some(response) = join_set.join_next().await {
+            if let Ok(response) = response {
+                match response {
+                    Ok((_, _)) => {
+                    },
+                    Err(e) => {
+                        println!("{}", e);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+enum ReviewType {
+    Lesson(SubjectCounts),
+    Review(ReviewStats),
 }
 
 #[derive(Default)]
@@ -884,7 +965,7 @@ struct ReviewStats {
     total_reviews: usize
 }
 
-async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>, stats: &mut ReviewStats, audio_tx: &Sender<AudioMessage>, connection: &AsyncConnection) -> Result<(), WaniError> {
+async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>, rev_type: &mut ReviewType, audio_tx: &Sender<AudioMessage>, connection: &AsyncConnection) -> Result<(), WaniError> {
     enum AnswerColor {
         Green,
         Red,
@@ -923,7 +1004,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
             break 'subject;
         }
         let subject = subject.unwrap();
-        let characters = get_chars_for_subj(&term, subject, image_cache, radical_width, web_config).await;
+        let characters = get_chars_for_subj(subject, image_cache, radical_width, web_config).await;
         let is_meaning = match subject {
             Subject::Radical(_) => true,
             Subject::Kanji(_) => {
@@ -958,7 +1039,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
         }).collect_vec();
 
         let mut toast = None;
-        print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, "")?;
+        print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, "")?;
         term.move_cursor_to(width / 2, 2 + characters.len())?;
         term.flush()?;
 
@@ -988,7 +1069,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                 });
                 vis_input = if is_meaning { &input } else { &kana_input };
                 let input_padded = pad_str(&vis_input, width, align, None);
-                print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, &input_padded)?;
+                print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, &input_padded)?;
                 let input_width = console::measure_text_width(&vis_input);
                 term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
                 term.flush()?;
@@ -1015,7 +1096,18 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                     review.status = match subject {
                         Subject::Radical(_) | Subject::KanaVocab(_) => 
                         {
-                            stats.done += 1;
+                            match rev_type {
+                                ReviewType::Review(stats) => {
+                                    stats.done += 1;
+                                },
+                                ReviewType::Lesson(subj_counts) => {
+                                    match subject {
+                                        Subject::Radical(_) => subj_counts.radical_count -= 1,
+                                        Subject::Kanji(_) => subj_counts.kanji_count -= 1,
+                                        _ => subj_counts.vocab_count -= 1,
+                                    }
+                                },
+                            }
                             batch.pop();
                             wanidata::ReviewStatus::Done
                         },
@@ -1030,7 +1122,18 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                                     }
                                 },
                                 _ => { 
-                                    stats.done += 1;
+                                    match rev_type {
+                                        ReviewType::Review(stats) => {
+                                            stats.done += 1;
+                                        },
+                                        ReviewType::Lesson(subj_counts) => {
+                                            match subject {
+                                                Subject::Radical(_) => subj_counts.radical_count -= 1,
+                                                Subject::Kanji(_) => subj_counts.kanji_count -= 1,
+                                                _ => subj_counts.vocab_count -= 1,
+                                            }
+                                        },
+                                    }
                                     batch.pop();
                                     ReviewStatus::Done
                                 }
@@ -1040,7 +1143,9 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                     (false, toast, AnswerColor::Green)
                 },
                 wanidata::AnswerResult::Incorrect => {
-                    stats.failed += 1;
+                    if let ReviewType::Review(stats) = rev_type {
+                        stats.failed += 1;
+                    }
                     if is_meaning {
                         review.incorrect_meaning_answers += 1;
                     }
@@ -1054,7 +1159,9 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
             toast = tuple.1;
 
             if !tuple.0 {
-                stats.guesses += 1;
+                if let ReviewType::Review(stats) = rev_type {
+                    stats.guesses += 1;
+                }
             }
 
             let input_line = pad_str(&vis_input, width, align, None);
@@ -1070,7 +1177,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                 },
             };
 
-            print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
+            print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
             let input_width = console::measure_text_width(&vis_input);
             term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
             term.flush()?;
@@ -1142,7 +1249,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
                     _ => {},
                 }
 
-                print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
+                print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
                 if let InfoStatus::Open(info_status) = info_status {
                     let lines = get_info_lines(&subject, info_status, width, text_width, align, &wfmt_args, is_meaning, connection).await;
                     for line in &lines {
@@ -1160,7 +1267,7 @@ async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWeb
             }
 
             toast = None;
-            print_review_screen(&term, stats, width, align, &char_line, review_type_text, &toast, &"")?;
+            print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, &"")?;
             let input_width = 0;
             term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
             term.flush()?;
@@ -1233,10 +1340,11 @@ async fn command_review(args: &Args) {
         let mut first_reviews = None;
 
         let total_assignments = assignments.len() + if let Some(batch) = &first_batch { batch.len() } else { 0 };
-        let mut stats = ReviewStats {
+        let stats = ReviewStats {
             total_reviews: total_assignments,
             ..Default::default()
         };
+        let mut stats = ReviewType::Review(stats);
         while assignments.len() > 0 {
             let mut batch = match first_batch { 
                 None => { 
@@ -1606,14 +1714,14 @@ async fn list_radicals_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &s
     match lookup_radical(conn, ids).await {
         Ok(radicals) => {
             let mut i = 0;
-            let radicals_in_line = 6;
+            let radicals_in_line = 3;
             lines.push(pad_str(label, width, align, None).to_string());
             while i < radicals.len() {
                 let mut j = 0;
                 let mut radical_line = vec![];
                 while i < radicals.len() && j < radicals_in_line {
                     if let Some(characters) = &radicals[i].data.characters {
-                        radical_line.push(characters);
+                        radical_line.push(format!("{} {}", characters, &radicals[i].primary_meanings().next().unwrap_or(&String::from(""))));
                         j += 1;
                     }
                     i += 1;
@@ -1800,8 +1908,9 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
         // 1 - kanji reading, mnemonic, TODO hint
         // 2 - visually similar kanji
         // 3 - found in vocab
+        // 4 - radical combination
         Subject::Kanji(k) => {
-            let num_choices = 4;
+            let num_choices = 5;
             let info_status = info_status % num_choices;
 
             // When we are reviewing "reading":
@@ -1827,6 +1936,10 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
                 3 => {
                     let label = "Found in Vocab:";
                     list_vocab_from_ids(conn, k.data.amalgamation_subject_ids.clone(), label, width, align).await
+                },
+                4 => {
+                    let label = "Radical Combination:";
+                    list_radicals_from_ids(conn, k.data.component_subject_ids.clone(), label, width, align).await
                 },
                 _ => { vec![] }
             }
@@ -1921,7 +2034,7 @@ async fn vocab_kanji_composition(v: &wanidata::Vocab, width: usize, align: conso
                 let mut j = 0;
                 let mut kanji_line = vec![];
                 while i < kanji.len() && j < kanji_in_line {
-                    kanji_line.push(format!("{}: {}", 
+                    kanji_line.push(format!("{} {}", 
                                             &kanji[i].data.characters, 
                                             &kanji[i].primary_meanings()
                                             .map(|m| m.to_owned())
@@ -2574,7 +2687,7 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
         }
         
         let info = RequestInfo::<()> {
-            url: &url,
+            url,
             method: RequestMethod::Get,
             query: if query.len() > 0 { Some(query) } else { None }, 
             ..Default::default()
@@ -2737,7 +2850,7 @@ async fn load_user_from_wk(web_config: &WaniWebConfig, conn: &AsyncConnection, r
         }
     } else { None };
     let info = RequestInfo::<()> {
-        url: "https://api.wanikani.com/v2/user",
+        url: "https://api.wanikani.com/v2/user".to_owned(),
         method: RequestMethod::Get,
         headers,
         ..Default::default()
@@ -2798,7 +2911,7 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
                 query.push(("levels", "1,2,3"));
             }
             let info = RequestInfo::<()> {
-                url: &url,
+                url: url,
                 method: RequestMethod::Get,
                 query: if query.len() > 0 { Some(query) } else { None },
                 headers: if let Some(tag) = &subjects_cache.last_modified {
@@ -3049,7 +3162,7 @@ async fn command_test_throttle(args: &Args) {
 
     for i in 0..150 {
         let info = RequestInfo::<()> {
-            url: "https://api.wanikani.com/v2/assignments",
+            url: "https://api.wanikani.com/v2/assignments".to_owned(),
             method: RequestMethod::Get,
             query: Some(vec![("updated_after", &now)]),
             ..Default::default()
@@ -3096,11 +3209,12 @@ enum RequestMethod {
     #[default]
     Get,
     Post,
+    Put,
 }
 
 #[derive(Default)]
 struct RequestInfo<'a, T: serde::Serialize + Sized> {
-    url: &'a str,
+    url: String,
     method: RequestMethod,
     query: Option<Vec<(&'a str, &'a str)>>,
     headers: Option<Vec<(String, String)>>,
@@ -3109,8 +3223,9 @@ struct RequestInfo<'a, T: serde::Serialize + Sized> {
 
 fn build_request<'a, T: serde::Serialize + Sized>(info: &RequestInfo<'a, T>, web_config: &WaniWebConfig) -> reqwest::RequestBuilder {
     let request = match info.method {
-        RequestMethod::Get => web_config.client.get(info.url),
-        RequestMethod::Post => web_config.client.post(info.url),
+        RequestMethod::Get => web_config.client.get(info.url.clone()),
+        RequestMethod::Post => web_config.client.post(info.url.clone()),
+        RequestMethod::Put => web_config.client.put(info.url.clone()),
     };
 
     let mut request = request 
@@ -3311,7 +3426,7 @@ async fn command_summary(args: &Args) {
     let web_config = web_config.unwrap();
 
     let info = RequestInfo::<()> {
-        url: "https://api.wanikani.com/v2/summary",
+        url: "https://api.wanikani.com/v2/summary".to_owned(),
         ..Default::default()
     };
 
@@ -3542,7 +3657,7 @@ where P: AsRef<Path>, {
     Ok(io::BufReader::new(file).lines())
 }
 
-async fn get_chars_for_subj(term: &Term, subject: &wanidata::Subject, image_cache: &PathBuf, radical_width: u32, web_config: &WaniWebConfig) -> Vec<String> {
+async fn get_chars_for_subj(subject: &wanidata::Subject, image_cache: &PathBuf, radical_width: u32, web_config: &WaniWebConfig) -> Vec<String> {
     match subject {
         Subject::Radical(r) => { 
             let rad_chars;
