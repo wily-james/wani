@@ -80,6 +80,8 @@ enum Command {
     ForceSync,
     /// Begin or resume a review session.
     Review,
+    /// a shorthand for the 'review' command
+    R,
 
     // Debug/Testing commands:
     /// Check the cache info in db
@@ -203,6 +205,7 @@ async fn main() -> Result<(), WaniError> {
                 Command::Sync => command_sync(&args, false).await,
                 Command::ForceSync => command_sync(&args, true).await,
                 Command::Review => command_review(&args).await,
+                Command::R => command_review(&args).await,
 
                 // Testing
                 Command::CacheInfo => command_cache_info(&args),
