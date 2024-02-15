@@ -448,7 +448,7 @@ pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool, kana_
 
 pub fn is_vocab_reading_correct(readings: &Vec<VocabReading>, guess: &str) -> AnswerResult {
     for reading in readings {
-        if reading.reading.to_lowercase() == guess {
+        if reading.reading.trim().to_lowercase() == guess {
             if reading.accepted_answer {
                 return AnswerResult::Correct;
             }
@@ -462,7 +462,7 @@ pub fn is_vocab_reading_correct(readings: &Vec<VocabReading>, guess: &str) -> An
 
 pub fn is_reading_correct(readings: &Vec<KanjiReading>, guess: &str) -> AnswerResult {
     for reading in readings {
-        if guess == reading.reading.to_lowercase() {
+        if guess == reading.reading.trim().to_lowercase() {
             if reading.accepted_answer {
                 return AnswerResult::Correct;
             }
@@ -477,7 +477,7 @@ pub fn is_reading_correct(readings: &Vec<KanjiReading>, guess: &str) -> AnswerRe
 pub fn is_meaning_correct(meanings: &Vec<Meaning>, guess: &str) -> AnswerResult {
     let mut best = AnswerResult::Incorrect;
     for meaning in meanings {
-        if guess == meaning.meaning.to_lowercase() {
+        if guess == meaning.meaning.trim().to_lowercase() {
             if meaning.accepted_answer {
                 return AnswerResult::Correct;
             }

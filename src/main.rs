@@ -473,7 +473,7 @@ async fn command_review(args: &Args) {
                     continue;
                 }
 
-                let guess = vis_input.to_lowercase();
+                let guess = vis_input.trim().to_lowercase();
                 let answer_result = wanidata::is_correct_answer(subject, &guess, is_meaning, &kana_input);
 
                 // Tuple (retry, toast, correct)
