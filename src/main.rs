@@ -1,4 +1,8 @@
 use serde::Deserialize;
+use chrono::{
+    DateTime,
+    Utc,
+};
 use reqwest::{
     blocking::Client,
     //Error,
@@ -35,13 +39,13 @@ struct SummaryData {
 
 #[derive(Deserialize, Debug)]
 struct SummaryReview {
-    //available_at: String,
+    available_at: DateTime<Utc>,
     subject_ids: Vec<i32>,
 }
 
 #[derive(Deserialize, Debug)]
 struct Lesson {
-    //available_at: String,
+    available_at: DateTime<Utc>,
     subject_ids: Vec<i32>
 }
 
@@ -56,6 +60,7 @@ fn main() {
         .unwrap();
 
     let wani = response.json::<WaniResp>();
+    let now = Utc::now();
     match wani {
         Err(s) => println!("Error parsing response: {}", s),
         Ok(w) => {
@@ -63,14 +68,18 @@ fn main() {
                 WaniData::Report(s) => {
                     let mut count = 0;
                     for lesson in s.data.lessons {
-                        count += lesson.subject_ids.len();
+                        if lesson.available_at < now {
+                            count += lesson.subject_ids.len();
+                        }
                     }
 
                     println!("Lessons: {:?}", count);
 
                     let mut count = 0;
                     for review in s.data.reviews {
-                        count += review.subject_ids.len();
+                        if review.available_at < now {
+                            count += review.subject_ids.len();
+                        }
                     }
 
                     println!("Reviews: {:?}", count);
