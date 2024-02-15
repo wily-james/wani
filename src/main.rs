@@ -230,131 +230,150 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
 
         let web_config = web_config.unwrap();
         let client = Client::new();
-        let mut request = client
-            .get("https://api.wanikani.com/v2/subjects")
-            .header("Wanikani-Revision", "20170710")
-            .bearer_auth(web_config.auth);
+        let mut next_url: Option<String> = Some("https://api.wanikani.com/v2/subjects".into());
+        let mut total_parse_fails = 0;
+        let mut updated_resources = 0;
+        let mut headers: Option<reqwest::header::HeaderMap> = None;
+        let mut last_request_time = Utc::now();
+        while let Some(url) = next_url {
+            let mut request = client
+                .get(url)
+                .header("Wanikani-Revision", "20170710")
+                .bearer_auth(&web_config.auth);
 
-        if let Some(tag) = last_modified {
-            request = request.header(reqwest::header::LAST_MODIFIED, &tag);
-        }
-
-        if let Some(after) = updated_after {
-            request = request.query(&[("updated_after", &after)]);
-        }
-
-        let request_time = Utc::now();
-        match parse_response(request.send().await).await {
-            Ok(t) => {
-                let wr = t.0;
-                let headers = t.1;
-
-                match wr.data {
-                    WaniData::Collection(c) => {
-                        let mut parse_fails = 0;
-                        let mut radicals: Vec<wanidata::Radical> = vec![];
-                        let mut kanji: Vec<wanidata::Kanji> = vec![];
-                        let mut vocab: Vec<wanidata::Vocab> = vec![];
-                        let mut kana_vocab: Vec<wanidata::KanaVocab> = vec![];
-                        for wd in c.data {
-                            match wd {
-                                WaniData::Radical(r) => {
-                                    radicals.push(r);
-                                }, 
-                                WaniData::Kanji(k) => {
-                                    kanji.push(k);
-                                },
-                                WaniData::Vocabulary(v) => {
-                                    vocab.push(v);
-                                },
-                                WaniData::KanaVocabulary(kv) => {
-                                    kana_vocab.push(kv);
-                                },
-                                _ => {},
-                            }
-                        }
-
-                        let stmt_res = conn.prepare(wanisql::INSERT_RADICALS);
-                        let rad_len = radicals.len();
-                        match stmt_res {
-                            Ok(mut stmt) => {
-                                for r in radicals {
-                                    match wanisql::store_radical(r, &mut stmt) {
-                                        Err(e) => {
-                                            println!("Error inserting into radicals.\n{}", e);
-                                            parse_fails += 1;
-                                        }
-                                        Ok(_) => {},
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                println!("Error preparing insert into radicals statement. Error: {}", e);
-                                parse_fails += rad_len;
-                            }
-                        }
-
-                        let stmt_res = conn.prepare(wanisql::INSERT_KANJI);
-                        let kanji_len = kanji.len();
-                        match stmt_res {
-                            Ok(mut stmt) => {
-                                for k in kanji {
-                                    match wanisql::store_kanji(k, &mut stmt) {
-                                        Err(e) => {
-                                            println!("Error inserting into kanji.\n{}", e);
-                                            parse_fails += 1;
-                                        }
-                                        Ok(_) => {},
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                println!("Error preparing insert into kanji statement. Error: {}", e);
-                                parse_fails += kanji_len;
-                            }
-                        }
-
-                        let stmt_res = conn.prepare(wanisql::INSERT_VOCAB);
-                        let vocab_len = vocab.len();
-                        match stmt_res {
-                            Ok(mut stmt) => {
-                                for v in vocab {
-                                    match wanisql::store_vocab(v, &mut stmt) {
-                                        Err(e) => {
-                                            println!("Error inserting into vocab.\n{}", e);
-                                            parse_fails += 1;
-                                        }
-                                        Ok(_) => {},
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                println!("Error preparing insert into vocab statement. Error: {}", e);
-                                parse_fails += vocab_len;
-                            }
-                        }
-
-                        println!("Updated Resources: {}", rad_len + kanji_len + vocab_len + kana_vocab.len());
-                        if parse_fails > 0 {
-                            println!("Parse Failures: {}", parse_fails);
-                        }
-
-                        if let Some(tag) = headers.get(reqwest::header::LAST_MODIFIED)
-                        {
-                            if let Ok(t) = tag.to_str() {
-                                conn
-                                    .execute("update cache_info set last_modified = ?1, updated_after = ?2, etag = ?3 where id = ?4;", params![t, &request_time.to_rfc3339(), Option::<String>::None, "0"])
-                                    .unwrap();
-                            }
-                        }
-                    },
-                    _ => {
-                        println!("Unexpected data returned while updating resources cache: {:?}", wr.data)
-                    },
-                }
+            if let Some(tag) = &last_modified {
+                request = request.header(reqwest::header::LAST_MODIFIED, tag);
             }
 
-            Err(s) => println!("{}", s),
+            if let Some(after) = &updated_after {
+                request = request.query(&[("updated_after", after)]);
+            }
+
+            last_request_time = Utc::now();
+            next_url = None;
+            match parse_response(request.send().await).await {
+                Ok(t) => {
+                    let wr = t.0;
+                    headers = Some(t.1);
+
+                    match wr.data {
+                        WaniData::Collection(c) => {
+                            next_url = c.pages.next_url;
+                            let mut radicals: Vec<wanidata::Radical> = vec![];
+                            let mut kanji: Vec<wanidata::Kanji> = vec![];
+                            let mut vocab: Vec<wanidata::Vocab> = vec![];
+                            let mut kana_vocab: Vec<wanidata::KanaVocab> = vec![];
+                            let mut parse_fails = 0;
+                            for wd in c.data {
+                                match wd {
+                                    WaniData::Radical(r) => {
+                                        radicals.push(r);
+                                    }, 
+                                    WaniData::Kanji(k) => {
+                                        kanji.push(k);
+                                    },
+                                    WaniData::Vocabulary(v) => {
+                                        vocab.push(v);
+                                    },
+                                    WaniData::KanaVocabulary(kv) => {
+                                        kana_vocab.push(kv);
+                                    },
+                                    _ => {},
+                                }
+                            }
+
+                            let stmt_res = conn.prepare(wanisql::INSERT_RADICALS);
+                            let rad_len = radicals.len();
+                            match stmt_res {
+                                Ok(mut stmt) => {
+                                    for r in radicals {
+                                        match wanisql::store_radical(r, &mut stmt) {
+                                            Err(e) => {
+                                                println!("Error inserting into radicals.\n{}", e);
+                                                parse_fails += 1;
+                                            }
+                                            Ok(_) => {},
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    println!("Error preparing insert into radicals statement. Error: {}", e);
+                                    parse_fails += rad_len;
+                                }
+                            }
+
+                            let stmt_res = conn.prepare(wanisql::INSERT_KANJI);
+                            let kanji_len = kanji.len();
+                            match stmt_res {
+                                Ok(mut stmt) => {
+                                    for k in kanji {
+                                        match wanisql::store_kanji(k, &mut stmt) {
+                                            Err(e) => {
+                                                println!("Error inserting into kanji.\n{}", e);
+                                                parse_fails += 1;
+                                            }
+                                            Ok(_) => {},
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    println!("Error preparing insert into kanji statement. Error: {}", e);
+                                    parse_fails += kanji_len;
+                                }
+                            }
+
+                            let stmt_res = conn.prepare(wanisql::INSERT_VOCAB);
+                            let vocab_len = vocab.len();
+                            match stmt_res {
+                                Ok(mut stmt) => {
+                                    for v in vocab {
+                                        match wanisql::store_vocab(v, &mut stmt) {
+                                            Err(e) => {
+                                                println!("Error inserting into vocab.\n{}", e);
+                                                parse_fails += 1;
+                                            }
+                                            Ok(_) => {},
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    println!("Error preparing insert into vocab statement. Error: {}", e);
+                                    parse_fails += vocab_len;
+                                }
+                            }
+
+                            let this_res_count = rad_len + kanji_len + vocab_len + kana_vocab.len() - parse_fails;
+                            updated_resources += this_res_count;
+                            total_parse_fails += parse_fails;
+
+                            println!("Processed page with {} Resources and {} parse failures", this_res_count, parse_fails);
+                        },
+                        _ => {
+                            println!("Unexpected data returned while updating resources cache: {:?}", wr.data)
+                        },
+                    }
+                }
+                Err(s) => {
+                    headers = None; // clear out headers to skip updating cache_info.last_modified if any
+                                    // requests fail.
+                    println!("{}", s);
+                },
+            }
+        }
+
+        println!("Updated Resources: {}", updated_resources);
+        if total_parse_fails > 0 {
+            println!("Parse Failures: {}", total_parse_fails);
+        }
+
+        if let Some(h) = headers {
+            if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED)
+            {
+                if let Ok(t) = tag.to_str() {
+                    conn.execute("update cache_info set last_modified = ?1, updated_after = ?2, etag = ?3 where id = ?4;", params![t, &last_request_time.to_rfc3339(), Option::<String>::None, "0"])
+                        .unwrap();
+                }
+            }
         }
     }
 
@@ -453,7 +472,14 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
                     Ok((WaniResp {
                         url: r.url().to_string(),
                         data_updated_at: None,
-                        data: WaniData::Collection(wanidata::Collection { data: vec![] }),
+                        data: WaniData::Collection(wanidata::Collection { 
+                            data: vec![],
+                            pages: wanidata::PageData {
+                                per_page: 0,
+                                next_url: None,
+                                previous_url: None,
+                            },
+                        }),
                     }, r.headers().to_owned()))
                 },
                 StatusCode::UNAUTHORIZED => {

@@ -53,6 +53,14 @@ pub enum WaniData
 #[derive(Deserialize, Debug)]
 pub struct Collection {
     pub data: Vec<WaniData>,
+    pub pages: PageData
+}
+
+#[derive(Deserialize, Debug)]
+pub struct PageData {
+    pub per_page: i32,
+    pub next_url: Option<String>,
+    pub previous_url: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
