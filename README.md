@@ -33,8 +33,8 @@ TODO
 
 ## RECOMMENDED SETUP
 
-You'll need to provide your WaniKani personal [API token](https://www.wanikani.com/settings/personal_access_tokens).
-The easiest way to set this up is to create a config file at "~/.config/wani/.wani.conf".
+You'll need to provide your WaniKani personal [API token](https://www.wanikani.com/settings/personal_access_tokens).  
+The easiest way to set this up is to create a config file at "~/.config/wani/.wani.conf".  
 Add the following line to that file (replacing your_auth_token with your actual auth token).
 ```
 auth: your_auth_token
