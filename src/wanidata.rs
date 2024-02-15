@@ -547,7 +547,116 @@ pub fn format_wani_text(s: &str, args: &WaniFmtArgs) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_wani_text, WaniFmtArgs, EMPTY_ARGS};
+    use std::ops::Deref;
+
+    use chrono::Utc;
+
+    use crate::wanidata::AnswerResult;
+
+    use super::{format_wani_text, is_correct_answer, AuxMeaning, Kanji, KanjiData, KanjiReading, Meaning, Subject, WaniFmtArgs, EMPTY_ARGS};
+
+    fn get_kanji(meanings: Vec<Meaning>, readings: Vec<KanjiReading>, aux_meanings: Vec<AuxMeaning>) -> Kanji {
+        Kanji {
+            id: 1,
+            data: KanjiData {
+                aux_meanings,
+                readings,
+                meanings,
+                created_at: Utc::now(),
+                document_url: "".into(),
+                hidden_at: None,
+                lesson_position: 1,
+                level: 1,
+                meaning_mnemonic: "".into(),
+                slug: "".into(),
+                spaced_repetition_system_id: 1,
+                characters: "".into(),
+                amalgamation_subject_ids: vec![],
+                component_subject_ids: vec![],
+                meaning_hint: None,
+                reading_hint: None,
+                reading_mnemonic: "".into(),
+                visually_similar_subject_ids: vec![],
+            },
+        }
+    }
+
+    fn get_standard_kanji() -> Kanji {
+        let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+        let kanji_readings = vec![
+            KanjiReading { 
+                reading: "not_accepted_reading".into(), 
+                primary: true, 
+                accepted_answer: false, 
+                r#type: super::KanjiType::Nanori 
+            },
+            KanjiReading { 
+                reading: "accepted_reading".into(), 
+                primary: true, 
+                accepted_answer: true, 
+                r#type: super::KanjiType::Nanori 
+            },
+        ];
+        get_kanji(meanings, kanji_readings, vec![])
+    }
+
+    #[test]
+    fn is_correct_answer_standard_accepted_kanji_meaning() {
+        let is_meaning = true;
+        let kanji = get_standard_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_accepted_kanji_meaning() {
+        let is_meaning = true;
+        let kanji = get_standard_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "not_accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_accepted_with_whitespace_kanji_meaning() {
+        let is_meaning = true;
+        let kanji = get_standard_kanji();
+        //let meaning = kanji.data.meanings.first().unwrap();
+        //meaning.
+        let result = is_correct_answer(&Subject::Kanji(kanji), "accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_not_accepted_kanji_meaning() {
+        let is_meaning = true;
+        let kanji = get_standard_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "not_accepted", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_incorrect_kanji_meaning() {
+        let is_meaning = true;
+        let kanji = get_standard_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "foo", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
 
     const TEST_ARGS: WaniFmtArgs = WaniFmtArgs {
         radical_args: super::WaniTagArgs { 
