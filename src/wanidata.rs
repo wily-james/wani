@@ -1,3 +1,4 @@
+/// Data structures (and some related procedures) to model data going to/from WaniKani servers
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -899,7 +900,7 @@ pub fn format_wani_text(s: &str, args: &WaniFmtArgs) -> String {
 mod tests {
     use chrono::Utc;
     use crate::wanidata::{edit_distance, AnswerResult};
-    use super::{format_wani_text, is_correct_answer, AuxMeaning, AuxMeaningType, KanaVocab, KanaVocabData, Kanji, KanjiData, KanjiReading, Meaning, Radical, RadicalData, Subject, Vocab, VocabData, VocabReading, WaniFmtArgs, EMPTY_ARGS};
+    use super::{format_wani_text, is_correct_answer, AuxMeaning, AuxMeaningType, KanaVocab, KanaVocabData, Kanji, KanjiData, KanjiReading, Meaning, Radical, RadicalData, Subject, Vocab, VocabData, VocabReading, WaniFmtArgs};
 
     // #region is_correct_answer Kanji
 
@@ -1722,37 +1723,39 @@ mod tests {
     }
 
 
-    const TEST_ARGS: WaniFmtArgs = WaniFmtArgs {
-        radical_args: super::WaniTagArgs { 
-            open_tag: "[my_rad]",
-            close_tag: "[/my_rad]",
-        },
-        kanji_args: super::WaniTagArgs { 
-            open_tag: "[my_kanji]",
-            close_tag: "[/my_kanji]",
-        },
-        vocab_args: super::WaniTagArgs { 
-            open_tag: "[my_vocab]",
-            close_tag: "[/my_vocab]",
-        },
-        meaning_args: super::WaniTagArgs { 
-            open_tag: "[my_meaning]",
-            close_tag: "[/my_meaning]",
-        },
-        reading_args: super::WaniTagArgs { 
-            open_tag: "[my_reading]",
-            close_tag: "[/my_reading]",
-        },
-        ja_args: super::WaniTagArgs { 
-            open_tag: "[my_ja]",
-            close_tag: "[/my_ja]",
-        },
-    };
+    fn test_args() -> WaniFmtArgs { 
+        WaniFmtArgs {
+            radical_args: super::WaniTagArgs { 
+                open_tag: "[my_rad]".to_owned(),
+                close_tag: "[/my_rad]".to_owned(),
+            },
+            kanji_args: super::WaniTagArgs { 
+                open_tag: "[my_kanji]".to_owned(),
+                close_tag: "[/my_kanji]".to_owned(),
+            },
+            vocab_args: super::WaniTagArgs { 
+                open_tag: "[my_vocab]".to_owned(),
+                close_tag: "[/my_vocab]".to_owned(),
+            },
+            meaning_args: super::WaniTagArgs { 
+                open_tag: "[my_meaning]".to_owned(),
+                close_tag: "[/my_meaning]".to_owned(),
+            },
+            reading_args: super::WaniTagArgs { 
+                open_tag: "[my_reading]".to_owned(),
+                close_tag: "[/my_reading]".to_owned(),
+            },
+            ja_args: super::WaniTagArgs { 
+                open_tag: "[my_ja]".to_owned(),
+                close_tag: "[/my_ja]".to_owned(),
+            },
+        } 
+    }
 
     #[test]
     fn format_wani_text_no_tags_isnt_changed() {
         let text = "hey there buddy, what is up!!<><hello></hello> swag\n未来";
-        let formatted = format_wani_text(text, &TEST_ARGS);
+        let formatted = format_wani_text(text, &test_args());
         assert_eq!(text, &formatted);
     }
 
@@ -1760,17 +1763,17 @@ mod tests {
     fn format_wani_text_tags_are_changed() {
         let text = "this is a <radical>radical</radical>. This is a <kanji>kanji</kanji>.";
         let expected = "this is a [my_rad]radical[/my_rad]. This is a [my_kanji]kanji[/my_kanji].";
-        let formatted = format_wani_text(text, &TEST_ARGS);
+        let formatted = format_wani_text(text, &test_args());
         assert_eq!(expected, &formatted);
 
         let text = "this is a <vocabulary>vocab</vocabulary>. This is a <meaning>meaning</meaning>.";
         let expected = "this is a [my_vocab]vocab[/my_vocab]. This is a [my_meaning]meaning[/my_meaning].";
-        let formatted = format_wani_text(text, &TEST_ARGS);
+        let formatted = format_wani_text(text, &test_args());
         assert_eq!(expected, &formatted);
 
         let text = "this is a <reading>もうたべた</reading>. This is a <ja>漢字</ja>.";
         let expected = "this is a [my_reading]もうたべた[/my_reading]. This is a [my_ja]漢字[/my_ja].";
-        let formatted = format_wani_text(text, &TEST_ARGS);
+        let formatted = format_wani_text(text, &test_args());
         assert_eq!(expected, &formatted);
     }
 
@@ -1778,7 +1781,7 @@ mod tests {
     fn format_wani_empty_args_clears_tags() {
         let text = "this is a <radical>radical</radical>. This is a <kanji>kanji</kanji>.";
         let expected = "this is a radical. This is a kanji.";
-        let formatted = format_wani_text(text, &EMPTY_ARGS);
+        let formatted = format_wani_text(text, &WaniFmtArgs::default());
         assert_eq!(expected, &formatted);
     }
 
