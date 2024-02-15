@@ -29,7 +29,7 @@ pub struct ResourcesUpdatedAssignment {
     pub data: Assignment,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RateLimit {
     pub limit: usize,
     pub remaining: usize,

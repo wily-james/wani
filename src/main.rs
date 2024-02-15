@@ -496,8 +496,9 @@ async fn command_review(args: &Args) {
                 let info = RequestInfo {
                     url: "https://api.wanikani.com/v2/reviews/",
                     method: RequestMethod::Post,
-                    query: None,
                     json: Some(new_review),
+                    query: None,
+                    headers: None,
                 };
 
                
@@ -1041,6 +1042,7 @@ async fn command_review(args: &Args) {
     }
     let p_config = p_config.unwrap();
 
+    let rate_limit = Arc::new(Mutex::new(None));
     let web_config = get_web_config(&p_config);
     if let Err(e) = web_config {
         println!("{}", e);
@@ -1049,7 +1051,6 @@ async fn command_review(args: &Args) {
     let web_config = web_config.unwrap();
 
     let conn = setup_async_connection(&p_config).await;
-    let rate_limit = Arc::new(Mutex::new(None));
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -1061,7 +1062,7 @@ async fn command_review(args: &Args) {
                 }
             }
             println!("Syncing assignments. . .");
-            let _ = sync_assignments(&c, &web_config, ass_cache_info).await;
+            let _ = sync_assignments(&c, &web_config, ass_cache_info, &rate_limit).await;
 
             let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, [Utc::now().timestamp()]).await;
             if let Err(e) = assignments {
@@ -1077,7 +1078,6 @@ async fn command_review(args: &Args) {
             let existing_reviews = load_existing_reviews(&c, &assignments).await;
             let existing_reviews = match existing_reviews {
                 Ok(existing_reviews) => { 
-                    //println!("Invalid Reviews: {}, Finished reviews: {}, In progress reviews: {}", existing_reviews.invalid_reviews.len(), existing_reviews.finished_reviews.len(), existing_reviews.in_progress_reviews.len());
                     existing_reviews 
                 },
                 Err(e) => {
@@ -2101,24 +2101,24 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
     };
 }
 
-async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, cache_info: CacheInfo) -> Result<SyncResult, WaniError> {
+async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, cache_info: CacheInfo, rate_limit: &RateLimitBox) -> Result<SyncResult, WaniError> {
     let mut next_url = Some("https://api.wanikani.com/v2/assignments".to_owned());
 
     let mut assignments = vec![];
     let mut last_request_time: Option<DateTime<Utc>> = None;
     while let Some(url) = next_url {
         next_url = None;
-        let mut request = web_config.client
-            .get(url)
-            .header("Wanikani-Revision", &web_config.revision)
-            .bearer_auth(&web_config.auth);
-
-        if let Some(updated_after) = &cache_info.updated_after {
-            request = request.query(&[("updated_after", updated_after)]);
-        }
+        let info = RequestInfo::<()> {
+            url: &url,
+            method: RequestMethod::Get,
+            query: if let Some(after) = &cache_info.updated_after {
+                Some(vec![("updated_after", after)])
+            } else { None },
+            ..Default::default()
+        };
 
         last_request_time = Some(Utc::now());
-        match parse_response(request.send().await).await {
+        match send_throttled_request(info, rate_limit.clone(), web_config.clone()).await {
             Ok(t) => {
                 match t.0.data {
                     WaniData::Collection(c) => {
@@ -2181,30 +2181,29 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
 
 async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cache: bool) {
     async fn sync_subjects(conn: &AsyncConnection, 
-                           web_config: &WaniWebConfig, subjects_cache: CacheInfo) -> Result<SyncResult, WaniError> {
+                           web_config: &WaniWebConfig, subjects_cache: CacheInfo, rate_limit: &RateLimitBox) -> Result<SyncResult, WaniError> {
         let mut next_url: Option<String> = Some("https://api.wanikani.com/v2/subjects".into());
         let mut total_parse_fails = 0;
         let mut updated_resources = 0;
         let mut headers: Option<reqwest::header::HeaderMap> = None;
         let mut last_request_time = Utc::now();
         while let Some(url) = next_url {
-            let mut request = web_config.client
-                .get(url)
-                .header("Wanikani-Revision", &web_config.revision)
-                .bearer_auth(&web_config.auth);
-
-            if let Some(tag) = &subjects_cache.last_modified {
-                request = request.header(reqwest::header::LAST_MODIFIED, tag);
-            }
-
-            if let Some(after) = &subjects_cache.updated_after {
-                request = request.query(&[("updated_after", after)]);
-            }
+            let info = RequestInfo::<()> {
+                url: &url,
+                method: RequestMethod::Get,
+                query: if let Some(after) = &subjects_cache.updated_after {
+                    Some(vec![("updated_after", after)])
+                } else { None },
+                headers: if let Some(tag) = &subjects_cache.last_modified {
+                    Some(vec![(reqwest::header::LAST_MODIFIED.to_string(), tag.to_owned())])
+                } else { None },
+                ..Default::default()
+            };
 
             last_request_time = Utc::now();
             next_url = None;
-            let resp = request.send().await;
-            match parse_response(resp).await {
+            let resp = send_throttled_request(info, rate_limit.clone(), web_config.clone()).await;
+            match resp {
                 Ok(t) => {
                     let wr = t.0;
                     headers = Some(t.1);
@@ -2326,8 +2325,11 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
     }
     let mut c_infos = c_infos.unwrap();
 
-    let subj_future = sync_subjects(&conn, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()}));
-    let ass_future = sync_assignments(&conn, &web_config, c_infos.remove(&CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo { id: CACHE_TYPE_ASSIGNMENTS, ..Default::default()}));
+    let rate_limit = Arc::new(Mutex::new(None));
+    println!("Syncing subjects. . .");
+    let subj_future = sync_subjects(&conn, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()}), &rate_limit);
+    println!("Syncing assignments. . .");
+    let ass_future = sync_assignments(&conn, &web_config, c_infos.remove(&CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo { id: CACHE_TYPE_ASSIGNMENTS, ..Default::default()}), &rate_limit);
     let res = join![subj_future, ass_future];
 
     match res.0 {
@@ -2438,11 +2440,11 @@ async fn command_test_throttle(args: &Args) {
     println!("{:?}", rate_limit);
 
     for i in 0..150 {
-        let info = RequestInfo {
+        let info = RequestInfo::<()> {
             url: "https://api.wanikani.com/v2/assignments",
             method: RequestMethod::Get,
             query: Some(vec![("updated_after", &now)]),
-            json: None::<bool>,
+            ..Default::default()
         };
 
         let rate_limit_local = rate_limit.clone();
@@ -2481,15 +2483,19 @@ async fn command_test_subject(args: &Args) {
     }
 }
 
+#[derive(Default)]
 enum RequestMethod {
+    #[default]
     Get,
     Post,
 }
 
+#[derive(Default)]
 struct RequestInfo<'a, T: serde::Serialize + Sized> {
     url: &'a str,
     method: RequestMethod,
     query: Option<Vec<(&'a str, &'a str)>>,
+    headers: Option<Vec<(String, String)>>,
     json: Option<T>,
 }
 
@@ -2511,6 +2517,12 @@ fn build_request<'a, T: serde::Serialize + Sized>(info: &RequestInfo<'a, T>, web
 
     if let Some(json) = &info.json {
         request = request.json(json);
+    }
+
+    if let Some(headers) = &info.headers {
+        for (h, v) in headers {
+            request = request.header(h.clone(), v.clone());
+        }
     }
 
     request
@@ -2688,13 +2700,14 @@ async fn command_summary(args: &Args) {
         return;
     }
     let web_config = web_config.unwrap();
-    let response = web_config.client
-        .get("https://api.wanikani.com/v2/summary")
-        .header("Wanikani-Revision", web_config.revision)
-        .bearer_auth(web_config.auth)
-        .send();
 
-    match parse_response(response.await).await {
+    let info = RequestInfo::<()> {
+        url: "https://api.wanikani.com/v2/summary",
+        ..Default::default()
+    };
+
+    let rate_limit = Arc::new(Mutex::new(None));
+    match send_throttled_request(info, rate_limit, web_config).await {
         Ok(wr) => test_handle_wani_resp(wr.0),
         Err(s) => println!("{}", s),
     }
