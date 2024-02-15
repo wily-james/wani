@@ -33,6 +33,11 @@ Do your reviews
 wani r
 ```
 
+Do your lessons
+```
+wani l
+```
+
 ## CONFIGURATION
 
 ### FILE PATH
