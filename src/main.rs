@@ -52,6 +52,7 @@ enum Command {
     /// Check the cache info in db
     CacheInfo,
     QueryRadicals,
+    QueryKanji,
     TestSubject,
 }
 
@@ -100,11 +101,32 @@ fn main() {
                 // Testing
                 Command::CacheInfo => command_cache_info(&args),
                 Command::QueryRadicals => command_query_radicals(&args),
+                Command::QueryKanji => command_query_kanji(&args),
                 Command::TestSubject => command_test_subject(&args),
             }
         },
         None => command_summary(&args),
     }
+
+}
+
+fn command_query_kanji(args: &Args) {
+    let conn = setup_connection(&args);
+    match conn {
+        Err(e) => println!("{}", e),
+        Ok(c) => {
+            let mut stmt = c.prepare(wanisql::SELECT_ALL_KANJI).unwrap();
+            match stmt.query_map([], |k| wanisql::parse_kanji(k)
+                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                Ok(kanji) => {
+                    for k in kanji {
+                        println!("{:?}", k)
+                    }
+                },
+                Err(_) => {},
+            };
+        },
+    };
 
 }
 
@@ -205,7 +227,7 @@ fn command_sync(args: &Args, ignore_cache: bool) {
                     WaniData::Collection(c) => {
                         let mut parse_fails = 0;
                         let mut radicals: Vec<wanidata::Radical> = vec![];
-                        let mut kanji: Vec<String> = vec![];
+                        let mut kanji: Vec<wanidata::Kanji> = vec![];
                         let mut vocab: Vec<String> = vec![];
                         let mut kana_vocab: Vec<String> = vec![];
                         for wd in c.data {
@@ -214,12 +236,7 @@ fn command_sync(args: &Args, ignore_cache: bool) {
                                     radicals.push(r);
                                 }, 
                                 WaniData::Kanji(k) => {
-                                    if let Ok(s) = wanidata::Kanji::to_sql_str(k) {
-                                        kanji.push(s);
-                                    }
-                                    else {
-                                        parse_fails += 1;
-                                    }
+                                    kanji.push(k);
                                 },
                                 WaniData::Vocabulary(v) => {
                                     if let Ok(s) = wanidata::Vocab::to_sql_str(&v) {
@@ -261,7 +278,27 @@ fn command_sync(args: &Args, ignore_cache: bool) {
                             }
                         }
 
-                        println!("Updated Resources: {}", rad_len + kanji.len() + vocab.len() + kana_vocab.len());
+                        let stmt_res = conn.prepare(wanisql::INSERT_KANJI);
+                        let kanji_len = kanji.len();
+                        match stmt_res {
+                            Ok(mut stmt) => {
+                                for k in kanji {
+                                    match wanisql::store_kanji(k, &mut stmt) {
+                                        Err(e) => {
+                                            println!("Error inserting into kanji.\n{}", e);
+                                            parse_fails += 1;
+                                        }
+                                        Ok(_) => {},
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                println!("Error preparing insert into kanji statement. Error: {}", e);
+                                parse_fails += kanji_len;
+                            }
+                        }
+
+                        println!("Updated Resources: {}", rad_len + kanji_len + vocab.len() + kana_vocab.len());
                         if parse_fails > 0 {
                             println!("Parse Failures: {}", parse_fails);
                         }

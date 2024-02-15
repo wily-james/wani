@@ -124,6 +124,107 @@ pub(crate) const CREATE_KANJI_TBL: &str = "create table if not exists kanji (
             visually_similar_subject_ids text
         )";
 
+pub(crate) const INSERT_KANJI: &str = "replace into kanji
+                            (id,
+                             aux_meanings,
+                             created_at,
+                             document_url,
+                             hidden_at,
+                             lesson_position,
+                             level,
+                             meaning_mnemonic,
+                             meanings,
+                             slug,
+                             srs_id,
+                             characters,
+                             amalgamation_subject_ids,
+                             component_subject_ids,
+                             meaning_hint,
+                             reading_hint,
+                             reading_mnemonic,
+                             readings,
+                             visually_similar_subject_ids)
+                            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)";
+
+pub(crate) const SELECT_ALL_KANJI: &str = "select id,
+                             aux_meanings,
+                             created_at,
+                             document_url,
+                             hidden_at,
+                             lesson_position,
+                             level,
+                             meaning_mnemonic,
+                             meanings,
+                             slug,
+                             srs_id,
+                             characters,
+                             amalgamation_subject_ids,
+                             component_subject_ids,
+                             meaning_hint,
+                             reading_hint,
+                             reading_mnemonic,
+                             readings,
+                             visually_similar_subject_ids from kanji;";
+
+pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Statement<'_>) -> Result<usize, rusqlite::Error>
+{
+    let p = rusqlite::params!(
+        format!("{}", k.id),
+        serde_json::to_string(&k.data.aux_meanings).unwrap(),
+        k.data.created_at.to_rfc3339(),
+        k.data.document_url,
+        if let Some(hidden_at) = k.data.hidden_at { Some(hidden_at.to_rfc3339()) } else { None },
+        format!("{}", k.data.lesson_position),
+        format!("{}", k.data.level),
+        k.data.meaning_mnemonic,
+        serde_json::to_string(&k.data.meanings).unwrap(),
+        k.data.slug,
+        format!("{}", k.data.spaced_repetition_system_id),
+        k.data.characters,
+        serde_json::to_string(&k.data.amalgamation_subject_ids).unwrap(),
+        serde_json::to_string(&k.data.component_subject_ids).unwrap(),
+        k.data.meaning_hint,
+        k.data.reading_hint,
+        k.data.reading_mnemonic,
+        serde_json::to_string(&k.data.readings).unwrap(),
+        serde_json::to_string(&k.data.visually_similar_subject_ids).unwrap(),
+        );
+    return stmt.execute(p);
+}
+
+pub(crate) fn parse_kanji(k: &rusqlite::Row<'_>) -> Result<wanidata::Kanji, WaniError> {
+    return Ok(wanidata::Kanji {
+        id: k.get::<usize, i32>(0)?,
+        data: wanidata::KanjiData { 
+            aux_meanings: serde_json::from_str::<Vec<AuxMeaning>>(&k.get::<usize, String>(1)?)?,
+            created_at: DateTime::parse_from_rfc3339(&k.get::<usize, String>(2)?)?.with_timezone(&Utc),
+            document_url: k.get::<usize, String>(3)?, 
+            hidden_at: 
+                if let Some(t) = k.get::<usize, Option<String>>(4)? { 
+                    println!("Hidden at: {}", t);
+                    Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
+                } 
+                else { 
+                    None 
+                },
+            lesson_position: k.get::<usize, i32>(5)?, 
+            level: k.get::<usize, i32>(6)?, 
+            meaning_mnemonic: k.get::<usize, String>(7)?, 
+            meanings: serde_json::from_str::<Vec<wanidata::Meaning>>(&k.get::<usize, String>(8)?)?, 
+            slug: k.get::<usize, String>(9)?, 
+            spaced_repetition_system_id: k.get::<usize, i32>(10)?, 
+            characters: k.get::<usize, String>(11)?, 
+            amalgamation_subject_ids: serde_json::from_str::<Vec<i32>>(&k.get::<usize, String>(12)?)?, 
+            component_subject_ids: serde_json::from_str::<Vec<i32>>(&k.get::<usize, String>(13)?)?, 
+            meaning_hint: k.get::<usize, Option<String>>(14)?,
+            reading_hint: k.get::<usize, Option<String>>(15)?,
+            reading_mnemonic: k.get::<usize, String>(16)?,
+            readings: serde_json::from_str::<Vec<wanidata::KanjiReading>>(&k.get::<usize, String>(17)?)?,
+            visually_similar_subject_ids: serde_json::from_str::<Vec<i32>>(&k.get::<usize, String>(18)?)?, 
+        }
+    });
+}
+
 pub(crate) const CREATE_VOCAB_TBL: &str = "create table if not exists vocab (
             id integer primary key,
             aux_meanings text not null,
