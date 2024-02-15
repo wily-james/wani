@@ -6,8 +6,9 @@ use crate::wanidata::WaniResp;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use clap::{Parser, Subcommand};
 use chrono::Utc;
+use reqwest::Response;
 use reqwest::{
-    blocking::Client, StatusCode
+    Client, StatusCode
 };
 use rusqlite::params;
 use rusqlite::{
@@ -95,21 +96,21 @@ async fn main() -> Result<(), WaniError> {
     match &args.command {
         Some(c) => {
             match c {
-                Command::Summary => command_summary(&args),
-                Command::S => command_summary(&args),
+                Command::Summary => command_summary(&args).await,
+                Command::S => command_summary(&args).await,
                 Command::Init => command_init(&args),
-                Command::Sync => command_sync(&args, false),
-                Command::ForceSync => command_sync(&args, true),
+                Command::Sync => command_sync(&args, false).await,
+                Command::ForceSync => command_sync(&args, true).await,
 
                 // Testing
                 Command::CacheInfo => command_cache_info(&args),
                 Command::QueryRadicals => command_query_radicals(&args),
                 Command::QueryKanji => command_query_kanji(&args),
                 Command::QueryVocab => command_query_vocab(&args),
-                Command::TestSubject => command_test_subject(&args),
+                Command::TestSubject => command_test_subject(&args).await,
             };
         },
-        None => command_summary(&args),
+        None => command_summary(&args).await,
     };
 
     Ok(())
@@ -197,8 +198,8 @@ fn command_cache_info(args: &Args) {
     };
 }
 
-fn command_sync(args: &Args, ignore_cache: bool) {
-    fn sync(args: &Args, conn: &Connection, ignore_cache: bool) {
+async fn command_sync(args: &Args, ignore_cache: bool) {
+    async fn sync(args: &Args, conn: &Connection, ignore_cache: bool) {
         let web_config = get_web_config(&args);
         if let Err(e) = web_config {
             println!("{}", e);
@@ -243,7 +244,7 @@ fn command_sync(args: &Args, ignore_cache: bool) {
         }
 
         let request_time = Utc::now();
-        match parse_response(request.send()) {
+        match parse_response(request.send().await).await {
             Ok(t) => {
                 let wr = t.0;
                 let headers = t.1;
@@ -361,7 +362,7 @@ fn command_sync(args: &Args, ignore_cache: bool) {
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
-            sync(&args, &c, ignore_cache);
+            sync(&args, &c, ignore_cache).await;
             c.close().unwrap();
         },
     };
@@ -408,7 +409,7 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
     }
 }
 
-fn command_test_subject(args: &Args) {
+async fn command_test_subject(args: &Args) {
     let web_config = get_web_config(&args);
     if let Err(e) = web_config {
         println!("{}", e);
@@ -424,13 +425,13 @@ fn command_test_subject(args: &Args) {
         .bearer_auth(web_config.auth)
         .send();
 
-    match parse_response(response) {
+    match parse_response(response.await).await {
         Ok(t) => test_handle_wani_resp(t.0),
         Err(s) => println!("{}", s),
     }
 }
 
-fn parse_response(response: Result<reqwest::blocking::Response, reqwest::Error>) -> Result<(WaniResp, reqwest::header::HeaderMap), String> {
+async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(WaniResp, reqwest::header::HeaderMap), String> {
     match response {
         Err(s) => {
             Err(format!("Error with request: {}", s))
@@ -440,7 +441,7 @@ fn parse_response(response: Result<reqwest::blocking::Response, reqwest::Error>)
             match r.status() {
                 StatusCode::OK => {
                     let headers = r.headers().to_owned();
-                    let wani = r.json::<WaniResp>();
+                    let wani = r.json::<WaniResp>().await;
                     match wani {
                         Err(s) => Err(format!("Error parsing HTTP 200 response: {}", s)),
                         Ok(w) => {
@@ -467,7 +468,7 @@ fn parse_response(response: Result<reqwest::blocking::Response, reqwest::Error>)
     }
 }
 
-fn command_summary(args: &Args) {
+async fn command_summary(args: &Args) {
     let web_config = get_web_config(&args);
     if let Err(e) = web_config {
         println!("{}", e);
@@ -481,7 +482,7 @@ fn command_summary(args: &Args) {
         .bearer_auth(web_config.auth)
         .send();
 
-    match parse_response(response) {
+    match parse_response(response.await).await {
         Ok(wr) => test_handle_wani_resp(wr.0),
         Err(s) => println!("{}", s),
     }
