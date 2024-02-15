@@ -1,4 +1,5 @@
 
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use chrono::{
     DateTime,
@@ -599,16 +600,16 @@ pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool, kana_
     if is_meaning {
         return match subject {
             Subject::Radical(r) => {
-                is_correct(&r.data.meanings, &Vec::<Meaning>::new(), &r.data.aux_meanings, guess, kana_input)
+                is_correct(&r.data.meanings, &Vec::<Meaning>::new(), &r.data.aux_meanings, guess, kana_input, is_meaning)
            },
             Subject::KanaVocab(kv) => {
-                is_correct(&kv.data.meanings, &Vec::<Meaning>::new(), &kv.data.aux_meanings, guess, kana_input)
+                is_correct(&kv.data.meanings, &Vec::<Meaning>::new(), &kv.data.aux_meanings, guess, kana_input, true)
             },
             Subject::Kanji(k) => {
-                is_correct(&k.data.meanings, &k.data.readings, &k.data.aux_meanings, guess, kana_input)
+                is_correct(&k.data.meanings, &k.data.readings, &k.data.aux_meanings, guess, kana_input, true)
             },
             Subject::Vocab(v) => {
-                is_correct(&v.data.meanings, &v.data.readings, &v.data.aux_meanings, guess, kana_input)
+                is_correct(&v.data.meanings, &v.data.readings, &v.data.aux_meanings, guess, kana_input, true)
             },
         };
     }
@@ -617,12 +618,12 @@ pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool, kana_
     return match subject {
         Subject::Radical(_) => panic!("No readings for radical. should be unreachable."),
         Subject::KanaVocab(_) => panic!("No readings for kana vocab. should be unreachable."),
-        Subject::Kanji(k) => is_correct(&k.data.readings, &empty_vec, &empty_vec, guess, ""),
-        Subject::Vocab(v) => is_correct(&v.data.readings, &empty_vec, &empty_vec, guess, ""),
+        Subject::Kanji(k) => is_correct(&k.data.readings, &empty_vec, &empty_vec, guess, "", false),
+        Subject::Vocab(v) => is_correct(&v.data.readings, &empty_vec, &empty_vec, guess, "", false),
     };
 }
 
-fn is_correct<T, U, V>(meanings: &Vec<T>, readings: &Vec<U>, aux_meanings: &Vec<V>, guess: &str, kana_input: &str) -> AnswerResult
+fn is_correct<T, U, V>(meanings: &Vec<T>, readings: &Vec<U>, aux_meanings: &Vec<V>, guess: &str, kana_input: &str, allow_fuzzy: bool) -> AnswerResult
 where T: Answer, U: Answer, V: Answer {
     let mut expect_numeric = false;
     let mut best = AnswerResult::Incorrect;
@@ -660,7 +661,7 @@ where T: Answer, U: Answer, V: Answer {
     }
 
     if meanings.len() > 0 {
-        if let AnswerResult::Correct = is_correct::<U, T, V>(readings, &vec![], &vec![], kana_input, "") {
+        if let AnswerResult::Correct = is_correct::<U, T, V>(readings, &vec![], &vec![], kana_input, "", false) {
             return AnswerResult::KanaWhenMeaning;
         }
     }
@@ -675,9 +676,93 @@ where T: Answer, U: Answer, V: Answer {
         }) {
             return AnswerResult::BadFormatting;
         }
+
+        if !allow_fuzzy {
+            return best;
+        }
+
+        for m in meanings {
+            let (meaning, is_accepted_answer) = m.answer();
+            if fuzzy_accept(guess, &meaning.trim().to_lowercase()) {
+                if is_accepted_answer {
+                    return AnswerResult::FuzzyCorrect;
+                }
+                else {
+                    best = AnswerResult::MatchesNonAcceptedAnswer;
+                }
+            }
+        }
+
+        for m in aux_meanings {
+            let (meaning, is_accepted_answer) = m.answer();
+            if fuzzy_accept(guess, &meaning.trim().to_lowercase()) {
+                if is_accepted_answer {
+                    return AnswerResult::FuzzyCorrect;
+                }
+                else {
+                    best = AnswerResult::MatchesNonAcceptedAnswer;
+                }
+            }
+        }
     }
 
     return best;
+}
+
+fn fuzzy_accept(guess: &str, answer: &str) -> bool {
+    match answer.len() {
+        0 | 1 | 2 | 3  => {
+            false
+        },
+        4 | 5 => {
+            edit_distance(guess, answer) <= 1
+        },
+        6 | 7 => {
+            edit_distance(guess, answer) <= 2
+        },
+        n => {
+            edit_distance(guess, answer) <= (n / 7 + 2)
+        }
+    }
+}
+
+fn edit_distance(s: &str, t: &str) -> usize {
+    let s = s.chars().collect_vec();
+    let t = t.chars().collect_vec();
+
+    let n = s.len();
+    let m = t.len();
+
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+
+    let mut prev = Vec::with_capacity(m + 1);
+    let mut curr = Vec::with_capacity(n + 1);
+
+    for i in 0..m+1 {
+        prev.push(i);
+    }
+
+    for i in 1..n+1 {
+        curr.push(i);
+        for j in 1..m + 1 {
+            if s[i-1] == t[j-1] {
+                curr.push(prev[j-1]);
+            }
+            else {
+                let min = std::cmp::min(1 + prev[j], 1 + curr[j - 1]);
+                curr.push(std::cmp::min(min, 1 + prev[j - 1]));
+            }
+        }
+        prev = curr;
+        curr = Vec::with_capacity(n + 1);
+    }
+
+    prev[m]
 }
 
 pub struct WaniFmtArgs<'a> {
@@ -739,10 +824,73 @@ pub fn format_wani_text(s: &str, args: &WaniFmtArgs) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use crate::wanidata::AnswerResult;
+    use crate::wanidata::{edit_distance, AnswerResult};
     use super::{format_wani_text, is_correct_answer, AuxMeaning, AuxMeaningType, KanaVocab, KanaVocabData, Kanji, KanjiData, KanjiReading, Meaning, Radical, RadicalData, Subject, Vocab, VocabData, VocabReading, WaniFmtArgs, EMPTY_ARGS};
 
     // #region is_correct_answer Kanji
+
+    #[test]
+    fn is_correct_answer_accepted_kanji_meaning_edit_distance() {
+        let is_meaning = true;
+        let kanji = get_edit_dist_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "accepterd", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::FuzzyCorrect));
+    }
+
+    #[test]
+    fn is_correct_answer_low_edit_dist_but_matches_non_accepted() {
+        let is_meaning = true;
+        let kanji = get_edit_dist_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "accepted1", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_reading_doesnt_check_edit_dist() {
+        let is_meaning = false;
+        let kanji = get_edit_dist_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "はがねん", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    #[test]
+    fn is_correct_answer_high_edit_dist() {
+        let is_meaning = true;
+        let kanji = get_edit_dist_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "acceptedlmno", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    #[test]
+    fn is_correct_answer_short_answer_strict() {
+        let is_meaning = true;
+        let kanji = get_edit_dist_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "b", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    #[test]
+    fn is_correct_answer_shortish_answer_accepts_close() {
+        let is_meaning = true;
+        let kanji = get_edit_dist_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "accr", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::FuzzyCorrect));
+    }
+
+    #[test]
+    fn is_correct_answer_shortish_answer_rejects_far() {
+        let is_meaning = true;
+        let kanji = get_edit_dist_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "accerp", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
 
     #[test]
     fn is_correct_answer_kanji_on_whitelist() {
@@ -756,11 +904,33 @@ mod tests {
     }
 
     #[test]
+    fn is_correct_answer_kanji_on_whitelist_fuzzy() {
+        let is_meaning = true;
+        let kanji = get_aux_meaning_kanji();
+        let subj = Subject::Kanji(kanji);
+        let guess = "whitelisty";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::FuzzyCorrect));
+    }
+
+    #[test]
     fn is_correct_answer_kanji_on_blacklist() {
         let is_meaning = true;
         let kanji = get_aux_meaning_kanji();
         let subj = Subject::Kanji(kanji);
         let guess = "aux_blacklist";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_kanji_on_blacklist_fuzzy() {
+        let is_meaning = true;
+        let kanji = get_aux_meaning_kanji();
+        let subj = Subject::Kanji(kanji);
+        let guess = "blacklisty";
         let result = is_correct_answer(&subj, &guess, is_meaning, "");
 
         assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
@@ -1356,6 +1526,10 @@ mod tests {
                 meaning: "aux_blacklist".into(), 
             },
             AuxMeaning { 
+                r#type: AuxMeaningType::Blacklist, 
+                meaning: "blacklist".into(), 
+            },
+            AuxMeaning { 
                 r#type: AuxMeaningType::Whitelist, 
                 meaning: "aux_whitelist".into(), 
             },
@@ -1379,6 +1553,46 @@ mod tests {
             },
         ];
         get_kanji(meanings, kanji_readings, aux_meanings)
+    }
+
+    fn get_edit_dist_kanji() -> Kanji {
+        let meanings = vec![
+            Meaning {
+                meaning: "accepted1".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+            Meaning {
+                meaning: "a".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+            Meaning {
+                meaning: "acce".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+        let kanji_readings = vec![
+            KanjiReading { 
+                reading: "not_はがねの".into(), 
+                primary: true, 
+                accepted_answer: false, 
+                r#type: super::KanjiType::Nanori 
+            },
+            KanjiReading { 
+                reading: "はがねの".into(), 
+                primary: true, 
+                accepted_answer: true, 
+                r#type: super::KanjiType::Nanori 
+            },
+        ];
+        get_kanji(meanings, kanji_readings, vec![])
     }
 
     fn get_standard_kanji() -> Kanji {
@@ -1471,4 +1685,80 @@ mod tests {
         let formatted = format_wani_text(text, &EMPTY_ARGS);
         assert_eq!(expected, &formatted);
     }
+
+    // #region test edit_distance
+
+    #[test]
+    fn edit_distance_empty_equal_to_other() {
+        let s = "";
+        let t = "foo";
+        let expected = 3;
+        assert_eq!(expected, edit_distance(s, t));
+    }
+
+    #[test]
+    fn edit_distance_empty_equal_to_other_reversed() {
+        let s = "foobar";
+        let t = "";
+        let expected = 6;
+        assert_eq!(expected, edit_distance(s, t));
+    }
+
+    #[test]
+    fn edit_distance_1() {
+        let s = "foo";
+        let t = "foof";
+        let expected = 1;
+        assert_eq!(expected, edit_distance(s, t));
+    }
+
+    #[test]
+    fn edit_distance_2() {
+        let s = "";
+        let t = "1";
+        let expected = 1;
+        assert_eq!(expected, edit_distance(s, t));
+    }
+
+    #[test]
+    fn edit_distance_3() {
+        let s = "2";
+        let t = "1";
+        let expected = 1;
+        assert_eq!(expected, edit_distance(s, t));
+    }
+
+    #[test]
+    fn edit_distance_4() {
+        let s = "foobar";
+        let t = "foo";
+        let expected = 3;
+        assert_eq!(expected, edit_distance(s, t));
+    }
+
+    #[test]
+    fn edit_distance_5() {
+        let s = "foobar";
+        let t = "boo";
+        let expected = 4;
+        assert_eq!(expected, edit_distance(s, t));
+    }
+
+    #[test]
+    fn edit_distance_6() {
+        let s = "";
+        let t = "";
+        let expected = 0;
+        assert_eq!(expected, edit_distance(s, t));
+    }
+
+    #[test]
+    fn edit_distance_7() {
+        let s = "おはよう";
+        let t = "おはのう";
+        let expected = 1;
+        assert_eq!(expected, edit_distance(s, t));
+    }
+
+    // #endregion test edit_distance
 }

@@ -246,7 +246,7 @@ fn command_query_assignments(args: &Args) {
         Err(e) => println!("{}", e),
         Ok(c) => {
             let mut stmt = c.prepare(wanisql::SELECT_AVAILABLE_ASSIGNMENTS).unwrap();
-            match stmt.query_map([], |a| wanisql::parse_assignment(a)
+            match stmt.query_map([Utc::now().timestamp()], |a| wanisql::parse_assignment(a)
                                  .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
                 Ok(assigns) => {
                     for a in assigns {
@@ -730,10 +730,13 @@ async fn command_review(args: &Args) {
 
                 // Tuple (retry, toast, answer_color)
                 let tuple = match answer_result {
-                    wanidata::AnswerResult::FuzzyCorrect => todo!(),
                     wanidata::AnswerResult::BadFormatting => (true, Some("Try again!"), AnswerColor::Gray),
                     wanidata::AnswerResult::KanaWhenMeaning => (true, Some("We want the reading, not the meaning."), AnswerColor::Gray),
-                    wanidata::AnswerResult::Correct => {
+                    wanidata::AnswerResult::FuzzyCorrect | wanidata::AnswerResult::Correct => {
+                        let mut toast = correct_msg;
+                        if let wanidata::AnswerResult::FuzzyCorrect = answer_result {
+                            toast = Some("Answer was a bit off. . .");
+                        }
                         review.created_at = Utc::now();
                         review.status = match subject {
                             Subject::Radical(_) | Subject::KanaVocab(_) => 
@@ -766,7 +769,7 @@ async fn command_review(args: &Args) {
                                 }
                             },
                         };
-                        (false, correct_msg, AnswerColor::Green)
+                        (false, toast, AnswerColor::Green)
                     },
                     wanidata::AnswerResult::Incorrect => {
                         failed += 1;
@@ -928,6 +931,10 @@ async fn command_review(args: &Args) {
                 return;
             };
             let mut assignments = assignments.unwrap();
+            if assignments.len() == 0 {
+                println!("No assignments for now.");
+                return;
+            }
 
             let mut r_ids = vec![];
             let mut k_ids = vec![];
@@ -1091,6 +1098,7 @@ async fn command_review(args: &Args) {
             let _ = ctrlc::set_handler(move || {
                 println!("received Ctrl+C!");
             });
+
             let res = do_reviews(&mut assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit).await;
             match res {
                 Ok(_) => {},
