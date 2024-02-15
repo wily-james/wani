@@ -1,9 +1,7 @@
-use serde::{
-    de::{self, Visitor}, Deserialize, Deserializer
-};
+use serde::Deserialize;
 use reqwest::{
     blocking::Client,
-    Error,
+    //Error,
 };
 
 #[derive(Deserialize, Debug)]
@@ -17,8 +15,8 @@ enum WaniData
 
 #[derive(Debug, Deserialize)]
 struct WaniResp {
-    url: String,
-    data_updated_at: Option<String>, // TODO - optional for collections if no elements, mandatory
+    //url: String,
+    //data_updated_at: Option<String>, // TODO - optional for collections if no elements, mandatory
     #[serde(flatten)]
     data: WaniData
 }
@@ -30,12 +28,20 @@ struct Summary {
 
 #[derive(Deserialize, Debug)]
 struct SummaryData {
-    lessons: Vec<Lesson>
+    lessons: Vec<Lesson>,
+    //next_reviews_at: Option<String>,
+    reviews: Vec<SummaryReview>
+}
+
+#[derive(Deserialize, Debug)]
+struct SummaryReview {
+    //available_at: String,
+    subject_ids: Vec<i32>,
 }
 
 #[derive(Deserialize, Debug)]
 struct Lesson {
-    available_at: String,
+    //available_at: String,
     subject_ids: Vec<i32>
 }
 
@@ -53,7 +59,27 @@ fn main() {
     match wani {
         Err(s) => println!("Error parsing response: {}", s),
         Ok(w) => {
-            println!("{:?}", w);
+            match w.data {
+                WaniData::Report(s) => {
+                    let mut count = 0;
+                    for lesson in s.data.lessons {
+                        count += lesson.subject_ids.len();
+                    }
+
+                    println!("Lessons: {:?}", count);
+
+                    let mut count = 0;
+                    for review in s.data.reviews {
+                        count += review.subject_ids.len();
+                    }
+
+                    println!("Reviews: {:?}", count);
+                },
+
+                _ => {
+                    println!("Unexpected response type");
+                }
+            }
         }
     }
 }
