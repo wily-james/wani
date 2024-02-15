@@ -132,6 +132,26 @@ pub(crate) const SELECT_ALL_RADICALS: &str = "select
                                       characters,
                                       character_images from radicals;";
 
+pub(crate) fn select_radicals_by_id(n: usize) -> String {
+    return format!("select 
+                   id,
+                   aux_meanings,
+                   created_at,
+                   document_url,
+                   hidden_at,
+                   lesson_position,
+                   level,
+                   meaning_mnemonic,
+                   meanings,
+                   slug,
+                   srs_id,
+                   amalgamation_subject_ids,
+                   characters,
+                   character_images from radicals
+                   where id in ({});",
+        std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
+}
+
 pub(crate) fn store_radical(r: wanidata::Radical, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
 {
     let p = rusqlite::params!(
@@ -243,6 +263,30 @@ pub(crate) const SELECT_ALL_KANJI: &str = "select id,
                              reading_mnemonic,
                              readings,
                              visually_similar_subject_ids from kanji;";
+
+pub(crate) fn select_kanji_by_id(n: usize) -> String {
+    return format!("select id,
+                             aux_meanings,
+                             created_at,
+                             document_url,
+                             hidden_at,
+                             lesson_position,
+                             level,
+                             meaning_mnemonic,
+                             meanings,
+                             slug,
+                             srs_id,
+                             characters,
+                             amalgamation_subject_ids,
+                             component_subject_ids,
+                             meaning_hint,
+                             reading_hint,
+                             reading_mnemonic,
+                             readings,
+                             visually_similar_subject_ids from kanji
+                             where id in ({});",
+        std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
+}
 
 pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
 {
@@ -362,6 +406,29 @@ pub(crate) const SELECT_ALL_VOCAB: &str = "select id,
                              pronunciation_audios,
                              readings,
                              reading_mnemonic from vocab;";
+
+pub(crate) fn select_vocab_by_id(n: usize) -> String {
+    return format!("select id,
+                             aux_meanings,
+                             created_at,
+                             document_url,
+                             hidden_at,
+                             lesson_position,
+                             level,
+                             meaning_mnemonic,
+                             meanings,
+                             slug,
+                             srs_id,
+                             characters,
+                             component_subject_ids,
+                             context_sentences,
+                             parts_of_speech,
+                             pronunciation_audios,
+                             readings,
+                             reading_mnemonic from vocab
+                             where id in ({});",
+        std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
+}
 
 pub(crate) fn store_vocab(v: wanidata::Vocab, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
 {
@@ -492,6 +559,26 @@ pub(crate) const SELECT_ALL_KANA_VOCAB: &str = "select id,
                              context_sentences,
                              parts_of_speech,
                              pronunciation_audios from kana_vocab;";
+
+pub(crate) fn select_kana_vocab_by_id(n: usize) -> String {
+    return format!("select id,
+                   aux_meanings,
+                   created_at,
+                   document_url,
+                   hidden_at,
+                   lesson_position,
+                   level,
+                   meaning_mnemonic,
+                   meanings,
+                   slug,
+                   srs_id,
+                   characters,
+                   context_sentences,
+                   parts_of_speech,
+                   pronunciation_audios from kana_vocab
+                   where id in ({});",
+                         std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
+}
 
 pub(crate) fn parse_kana_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::KanaVocab, WaniError> {
     return Ok(wanidata::KanaVocab {

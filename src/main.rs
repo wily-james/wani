@@ -1,17 +1,15 @@
 mod wanidata;
 mod wanisql;
 
-use crate::wanidata::WaniData;
-use crate::wanidata::WaniResp;
+use crate::wanidata::{Assignment, Subject, SubjectType, WaniData, WaniResp};
 use std::collections::HashMap;
 use std::sync::PoisonError;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
 use chrono::Utc;
-use reqwest::Response;
 use reqwest::{
-    Client, StatusCode
+    Response, Client, StatusCode
 };
 use rusqlite::params;
 use rusqlite::{
@@ -20,6 +18,9 @@ use rusqlite::{
 use thiserror::Error;
 use tokio::join;
 use tokio_rusqlite::Connection as AsyncConnection;
+use console:: {
+    Term, Emoji
+};
 
 #[derive(Parser)]
 struct Args {
@@ -89,7 +90,8 @@ enum WaniError {
     AsyncSql(#[from] tokio_rusqlite::Error),
     Chrono(#[from] chrono::ParseError),
     Poison,
-    JoinError(#[from] tokio::task::JoinError)
+    JoinError(#[from] tokio::task::JoinError),
+    Io(#[from] std::io::Error),
 }
 
 impl<T> From<PoisonError<T>> for WaniError {
@@ -108,6 +110,7 @@ impl Display for WaniError {
             WaniError::Chrono(e) => e.fmt(f),
             WaniError::Poison => f.write_str("Error: Mutex poisoned."),
             WaniError::JoinError(e) => e.fmt(f),
+            WaniError::Io(e) => e.fmt(f),
         }
     }
 }
@@ -195,15 +198,16 @@ fn command_query_vocab(args: &Args) {
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
+            let args = [];
             let mut stmt = c.prepare(wanisql::SELECT_ALL_VOCAB).unwrap();
-            match stmt.query_map([], |v| wanisql::parse_vocab(v)
+            match stmt.query_map(args, |v| wanisql::parse_vocab(v)
                                  .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
                 Ok(vocab) => {
                     for v in vocab {
                         println!("{:?}", v)
                     }
                 },
-                Err(_) => {},
+                Err(e) => { println!("{}", e)},
             };
         },
     };
@@ -250,34 +254,210 @@ fn command_query_radicals(args: &Args) {
 }
 
 async fn command_review(args: &Args) {
-    let web_config = get_web_config(&args);
+    fn do_review(assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>) -> Result<(), WaniError> {
+            let term = Term::buffered_stdout();
 
+            term.read_key()?;
+
+            for assignment in &assignments {
+                term.clear_screen()?;
+                term.write_line(&format!("{}: {}%, {}: {}, {}: {}", Emoji("\u{1F44D}", "Correct"), 100, Emoji("\u{2705}", "Done"), 0, Emoji("\u{1F4E9}", "Remaining"), assignments.len()))?;
+
+                let subject = subjects.get(&assignment.data.subject_id);
+                if let Some(s) = subject {
+                    // Print subject display
+                    let display_text = match s {
+                        Subject::Radical(r) => if let Some(c) = &r.data.characters { &c } else { "Radical with no text"},
+                        Subject::Kanji(k) => &k.data.characters,
+                        Subject::Vocab(v) => &v.data.characters,
+                        Subject::KanaVocab(kv) => &kv.data.characters,
+                    };
+                    term.write_line(display_text)?;
+                }
+                else {
+                    term.write_line(&format!("Did not find subject with id: {}", assignment.data.subject_id))?;
+                }
+                term.flush()?;
+                term.read_key()?;
+            }
+
+            Ok(())
+    }
+
+    //let web_config = get_web_config(&args);
     let conn = setup_async_connection(&args).await;
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
-            if let Ok(wc) = web_config {
-                sync_all(&wc, &c, false).await;
-            }
+            //if let Ok(wc) = web_config {
+                //sync_all(&wc, &c, false).await;
+            //}
             
-            let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment).await;
+            let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, []).await;
             if let Err(e) = assignments {
                 println!("Error loading assignments. Error: {}", e);
                 return;
             };
             let assignments = assignments.unwrap();
-            clear_screen();
-            println!("Correct: {}%, Done: {}, Remaining: {}", 100, 0, assignments.len());
+
+            let mut r_ids = vec![];
+            let mut k_ids = vec![];
+            let mut v_ids = vec![];
+            let mut kv_ids = vec![];
+            for ass in &assignments {
+                match ass.data.subject_type {
+                    SubjectType::Radical => r_ids.push(ass.data.subject_id),
+                    SubjectType::Kanji => k_ids.push(ass.data.subject_id),
+                    SubjectType::Vocab => v_ids.push(ass.data.subject_id),
+                    SubjectType::KanaVocab => kv_ids.push(ass.data.subject_id),
+                }
+            }
+
+            let mut subjects_by_id = HashMap::new();
+
+            let radicals = c.call(move |c| { 
+                let stmt = c.prepare(&wanisql::select_radicals_by_id(r_ids.len()));
+                match stmt {
+                    Err(e) => {
+                        return Err(tokio_rusqlite::Error::Rusqlite(e));
+                    },
+                    Ok(mut stmt) => {
+                        match stmt.query_map(rusqlite::params_from_iter(r_ids), |r| wanisql::parse_radical(r)
+                                             .or_else
+                                             (|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                            Ok(radicals) => {
+                                let mut rads = vec![];
+                                for r in radicals {
+                                    if let Ok(rad) = r {
+                                        rads.push(rad);
+                                    }
+                                }
+                                Ok(rads)
+                            },
+                            Err(e) => {Err(tokio_rusqlite::Error::Rusqlite(e))},
+                        }
+                    }
+                }
+            }).await;
+            if let Err(e) = radicals {
+                println!("Error loading radicals. Error: {}", e);
+                return;
+            };
+            let radicals = radicals.unwrap();
+            for s in radicals {
+                subjects_by_id.insert(s.id, wanidata::Subject::Radical(s));
+            }
+
+            let kanji = c.call(move |c| { 
+                let stmt = c.prepare(&wanisql::select_kanji_by_id(k_ids.len()));
+                match stmt {
+                    Err(e) => {
+                        return Err(tokio_rusqlite::Error::Rusqlite(e));
+                    },
+                    Ok(mut stmt) => {
+                        match stmt.query_map(rusqlite::params_from_iter(k_ids.iter()), |r| wanisql::parse_kanji(r)
+                                             .or_else
+                                             (|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                            Ok(radicals) => {
+                                let mut rads = vec![];
+                                for r in radicals {
+                                    if let Ok(rad) = r {
+                                        rads.push(rad);
+                                    }
+                                }
+                                Ok(rads)
+                            },
+                            Err(e) => {Err(tokio_rusqlite::Error::Rusqlite(e))},
+                        }
+                    }
+                }
+            }).await;
+            if let Err(e) = kanji {
+                println!("Error loading kanji. Error: {}", e);
+                return;
+            };
+            let kanji = kanji.unwrap();
+            println!("Found kanji: {}", kanji.len());
+            for s in kanji {
+                subjects_by_id.insert(s.id, wanidata::Subject::Kanji(s));
+            }
+            
+            let vocab = c.call(move |c| { 
+                let stmt = c.prepare(&wanisql::select_vocab_by_id(v_ids.len()));
+                match stmt {
+                    Err(e) => {
+                        return Err(tokio_rusqlite::Error::Rusqlite(e));
+                    },
+                    Ok(mut stmt) => {
+                        match stmt.query_map(rusqlite::params_from_iter(v_ids.iter()), |r| wanisql::parse_vocab(r)
+                                             .or_else
+                                             (|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                            Ok(radicals) => {
+                                let mut rads = vec![];
+                                for r in radicals {
+                                    if let Ok(rad) = r {
+                                        rads.push(rad);
+                                    }
+                                }
+                                Ok(rads)
+                            },
+                            Err(e) => {Err(tokio_rusqlite::Error::Rusqlite(e))},
+                        }
+                    }
+                }
+            }).await;
+            if let Err(e) = vocab {
+                println!("Error loading vocab. Error: {}", e);
+                return;
+            };
+            let vocab = vocab.unwrap();
+            println!("Found vocab: {}", vocab.len());
+            for s in vocab {
+                subjects_by_id.insert(s.id, wanidata::Subject::Vocab(s));
+            }
+
+            let kana_vocab = c.call(move |c| { 
+                let stmt = c.prepare(&wanisql::select_kana_vocab_by_id(kv_ids.len()));
+                match stmt {
+                    Err(e) => {
+                        return Err(tokio_rusqlite::Error::Rusqlite(e));
+                    },
+                    Ok(mut stmt) => {
+                        match stmt.query_map(rusqlite::params_from_iter(kv_ids.iter()), |r| wanisql::parse_kana_vocab(r)
+                                             .or_else
+                                             (|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                            Ok(radicals) => {
+                                let mut rads = vec![];
+                                for r in radicals {
+                                    if let Ok(rad) = r {
+                                        rads.push(rad);
+                                    }
+                                }
+                                Ok(rads)
+                            },
+                            Err(e) => {Err(tokio_rusqlite::Error::Rusqlite(e))},
+                        }
+                    }
+                }
+            }).await;
+            if let Err(e) = kana_vocab {
+                println!("Error loading kana_vocab. Error: {}", e);
+                return;
+            };
+            let kana_vocab = kana_vocab.unwrap();
+            for s in kana_vocab {
+                subjects_by_id.insert(s.id, wanidata::Subject::KanaVocab(s));
+            }
+
+            println!("Found ids: {}", subjects_by_id.len());
+
+            let _ = do_review(assignments, subjects_by_id);
         },
     };
 }
 
-fn clear_screen() {
-    print!("{esc}c", esc = 27 as char);
-}
-
-async fn select_data<T, F>(sql: &'static str, c: &AsyncConnection, parse_fn: F) -> Result<Vec<T>, tokio_rusqlite::Error> 
-where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_>) -> Result<T, WaniError> {
+async fn select_data<T, F, P>(sql: &'static str, c: &AsyncConnection, parse_fn: F, params: P) -> Result<Vec<T>, tokio_rusqlite::Error> 
+where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_>) -> Result<T, WaniError>, P: Send + Sync + 'static + rusqlite::Params {
     return c.call(move |c| { 
         let stmt = c.prepare(sql);
         match stmt {
@@ -285,7 +465,7 @@ where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_
                 return Err(tokio_rusqlite::Error::Rusqlite(e));
             },
             Ok(mut stmt) => {
-                match stmt.query_map([], |r| parse_fn(r)
+                match stmt.query_map(params, |r| parse_fn(r)
                                      .or_else
                                      (|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
                     Ok(radicals) => {
@@ -336,16 +516,6 @@ fn command_cache_info(args: &Args) {
     };
 }
 
-fn get_cache_info(conn: &Connection, cache_type: usize) -> Result<CacheInfo, rusqlite::Error> {
-    return conn.query_row("select i.last_modified, i.updated_after, i.etag from cache_info i where id = ?1;",
-                             params![cache_type],
-                             |r| Ok(CacheInfo {
-                                 id: cache_type,
-                                 last_modified: r.get::<usize, Option<String>>(0)?, 
-                                 updated_after: r.get::<usize, Option<String>>(1)?,
-                                 etag: r.get::<usize, Option<String>>(2)? }));
-}
-
 async fn get_all_cache_infos(conn: &AsyncConnection, ignore_cache: bool) -> Result<HashMap<usize, CacheInfo>, WaniError> {
     if ignore_cache {
         return Ok(HashMap::new());
@@ -372,7 +542,7 @@ async fn get_all_cache_infos(conn: &AsyncConnection, ignore_cache: bool) -> Resu
 
 async fn command_sync(args: &Args, ignore_cache: bool) {
     let web_config = get_web_config(&args);
-    if let Err(e) = web_config {
+    if let Err(_) = web_config {
         return;
     }
     let web_config = web_config.unwrap();

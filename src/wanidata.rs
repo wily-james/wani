@@ -50,6 +50,14 @@ pub enum WaniData
     VoiceActor,
 }
 
+pub enum Subject
+{
+    Radical(Radical),
+    Kanji(Kanji),
+    Vocab(Vocab),
+    KanaVocab(KanaVocab),
+}
+
 #[derive(Deserialize, Debug)]
 pub struct Assignment {
     pub id: i32,
