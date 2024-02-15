@@ -204,7 +204,7 @@ fn wani_summary() {
                     }
                 },
                 StatusCode::UNAUTHORIZED => {
-                    println!("HTTP 401: Unauthorized");
+                    println!("HTTP 401: Unauthorized. Make sure your wanikani auth token is correct, and hasn't been expired.");
                 },
                 StatusCode::TOO_MANY_REQUESTS => {
                     println!("Wanikani API rate limit exceeded.");
