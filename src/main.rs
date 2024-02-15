@@ -318,7 +318,7 @@ fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, width: usize,
                                              Emoji("\u{1F44D}", "Correct"), correct_percentage, 
                                              Emoji("\u{2705}", "Done"), stats.done, 
                                              Emoji("\u{1F4E9}", "Remaining"), stats.total_reviews - stats.done), 
-                                    width, align, None).deref())?;
+                                    width, console::Alignment::Right, None).deref())?;
         },
 
         ReviewType::Lesson(subj_counts) => {
