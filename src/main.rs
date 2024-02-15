@@ -9,6 +9,7 @@ use chrono::Utc;
 use reqwest::{
     blocking::Client, StatusCode
 };
+use rusqlite::params;
 use rusqlite::{
     Connection, Error as SqlError
 };
@@ -202,16 +203,16 @@ fn command_sync(args: &Args, ignore_cache: bool) {
             return;
         }
 
-        let mut etag: Option<String> = None;
+        let mut last_modified: Option<String> = None;
         let mut updated_after: Option<String> = None;
         if !ignore_cache {
-            let res = conn.query_row("select i.etag, i.updated_after from cache_info i where id = 0;",
+            let res = conn.query_row("select i.last_modified, i.updated_after from cache_info i where id = 0;",
                                      [],
                                      |r| Ok((r.get::<usize, Option<String>>(0), r.get::<usize, Option<String>>(1))));
             match res {
                 Ok(t) => {
                     if let Ok(tag) = t.0 {
-                        etag = tag;
+                        last_modified = tag;
                     }
                     if let Ok(after) = t.1 {
                         updated_after = after;
@@ -231,8 +232,8 @@ fn command_sync(args: &Args, ignore_cache: bool) {
             .header("Wanikani-Revision", "20170710")
             .bearer_auth(web_config.auth);
 
-        if let Some(tag) = etag {
-            request = request.header(reqwest::header::IF_NONE_MATCH, &tag);
+        if let Some(tag) = last_modified {
+            request = request.header(reqwest::header::LAST_MODIFIED, &tag);
         }
 
         if let Some(after) = updated_after {
@@ -335,11 +336,11 @@ fn command_sync(args: &Args, ignore_cache: bool) {
                             println!("Parse Failures: {}", parse_fails);
                         }
 
-                        if let Some(tag) = headers.get(reqwest::header::ETAG)
+                        if let Some(tag) = headers.get(reqwest::header::LAST_MODIFIED)
                         {
                             if let Ok(t) = tag.to_str() {
                                 conn
-                                    .execute("update cache_info set etag = ?1, updated_after = ?2 where id = ?3;", [t, &request_time.to_rfc3339(), "0"])
+                                    .execute("update cache_info set last_modified = ?1, updated_after = ?2, etag = ?3 where id = ?4;", params![t, &request_time.to_rfc3339(), Option::<String>::None, "0"])
                                     .unwrap();
                             }
                         }
