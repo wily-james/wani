@@ -3,6 +3,79 @@ use rusqlite::Transaction;
 
 use crate::{wanidata::{self, AuxMeaning, ContextSentence, PronunciationAudio, VocabReading}, WaniError};
 
+pub(crate) const CREATE_REVIEWS_TBL: &str = "create table if not exists new_reviews (
+            id integer primary key,
+            assignment_id integer not null,
+            created_at text not null,
+            incorrect_meaning_answers int not null,
+            incorrect_reading_answers int not null,
+            status integer not null
+        )";
+
+pub(crate) const INSERT_REVIEW: &str = "replace into new_reviews
+                            (id,
+                             assignment_id,
+                             created_at,
+                             incorrect_meaning_answers,
+                             incorrect_reading_answers,
+                             status)
+                            values (?1, ?2, ?3, ?4, ?5, ?6)";
+
+pub(crate) const INSERT_REVIEW_NO_ID: &str = "insert into new_reviews
+                            (assignment_id,
+                             created_at,
+                             incorrect_meaning_answers,
+                             incorrect_reading_answers,
+                             status)
+                            values (?1, ?2, ?3, ?4, ?5)";
+
+pub(crate) const SELECT_REVIEWS: &str = "select 
+                            id,
+                            assignment_id,
+                            created_at,
+                            incorrect_meaning_answers,
+                            incorrect_reading_answers,
+                            status from new_reviews;";
+
+pub(crate) const CLEAR_REVIEWS: &str = "delete from new_reviews";
+
+pub(crate) const REMOVE_REVIEW: &str = "delete from new_reviews where assignment_id = ?1;";
+
+pub(crate) fn parse_review(r: &rusqlite::Row<'_>) -> Result<wanidata::NewReview, WaniError> {
+    return Ok(wanidata::NewReview {
+        id: Some(r.get::<usize, i32>(0)?),
+        assignment_id: r.get::<usize, i32>(1)?,
+        created_at: DateTime::parse_from_rfc3339(&r.get::<usize, String>(2)?)?.with_timezone(&Utc),
+        incorrect_meaning_answers: r.get::<usize, u16>(3)?,
+        incorrect_reading_answers: r.get::<usize, u16>(4)?,
+        status: wanidata::ReviewStatus::from(r.get::<usize, usize>(5)?)
+    });
+}
+
+pub(crate) fn store_review(r: &wanidata::NewReview, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
+{
+    let status: usize = r.status.into();
+    if let Some(id) = r.id {
+        let p = rusqlite::params!(
+            id,
+            r.assignment_id,
+            r.created_at.to_rfc3339(),
+            r.incorrect_meaning_answers,
+            r.incorrect_reading_answers,
+            status);
+        return stmt.execute(INSERT_REVIEW, p);
+    }
+    else {
+        let p = rusqlite::params!(
+            r.assignment_id,
+            r.created_at.to_rfc3339(),
+            r.incorrect_meaning_answers,
+            r.incorrect_reading_answers,
+            status);
+        return stmt.execute(INSERT_REVIEW_NO_ID, p);
+    }
+}
+
 pub(crate) const CREATE_ASSIGNMENTS_TBL: &str = "create table if not exists assignments (
             id integer primary key,
             available_at int,

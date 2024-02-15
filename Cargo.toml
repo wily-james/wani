@@ -26,3 +26,4 @@ resvg = { version = "0.38.0" }
 usvg= { version = "0" }
 rgb = "0.8.37"
 glob = "0.3.1"
+ctrlc = "3.4.2"

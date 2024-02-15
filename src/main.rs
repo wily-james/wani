@@ -1,13 +1,13 @@
 mod wanidata;
 mod wanisql;
 
-use crate::wanidata::{Assignment, PronunciationAudio, RadicalImage, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
+use crate::wanidata::{Assignment, NewReview, PronunciationAudio, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::BufReader;
+use std::io::Write;
 use std::ops::Deref;
-use std::os::unix::fs::FileExt;
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
@@ -26,15 +26,15 @@ use rusqlite::{
     Connection, Error as SqlError
 };
 use thiserror::Error;
-use tokio::io::{AsyncWriteExt };
+use tokio::io::AsyncWriteExt;
 use tokio::join;
 use tokio_rusqlite::Connection as AsyncConnection;
 use console:: {
     pad_str, style, Emoji, Term
 };
-use usvg::{PostProcessingSteps, TreeParsing, TreeWriting, XmlOptions};
+use usvg::{PostProcessingSteps, TreeParsing};
 use wana_kana::ConvertJapanese;
-use image2ascii::{image2ascii, Char2DArray};
+use image2ascii::image2ascii;
 
 #[derive(Parser)]
 struct Args {
@@ -80,13 +80,15 @@ enum Command {
     QueryVocab,
     QueryKanaVocab,
     QueryAssignments,
+    QueryReviews,
+    ClearReviews,
     TestSubject,
 }
 
 /// Info saved to program config file
 struct ProgramConfig {
     auth: Option<String>,
-    configpath: PathBuf,
+    //configpath: PathBuf,
     colorblind: bool,
 }
 
@@ -167,6 +169,8 @@ async fn main() -> Result<(), WaniError> {
                 Command::QueryVocab => command_query_vocab(&args),
                 Command::QueryKanaVocab => command_query_kana_vocab(&args),
                 Command::QueryAssignments => command_query_assignments(&args),
+                Command::QueryReviews => command_query_reviews(&args),
+                Command::ClearReviews => command_clear_reviews(&args),
                 Command::TestSubject => command_test_subject(&args).await,
             };
         },
@@ -174,6 +178,35 @@ async fn main() -> Result<(), WaniError> {
     };
 
     Ok(())
+}
+
+fn command_clear_reviews(args: &Args) {
+    let conn = setup_connection(&args);
+    match conn {
+        Err(e) => println!("{}", e),
+        Ok(c) => {
+            let _ = c.execute(wanisql::CLEAR_REVIEWS, []);
+        },
+    };
+}
+
+fn command_query_reviews(args: &Args) {
+    let conn = setup_connection(&args);
+    match conn {
+        Err(e) => println!("{}", e),
+        Ok(c) => {
+            let mut stmt = c.prepare(wanisql::SELECT_REVIEWS).unwrap();
+            match stmt.query_map([], |a| wanisql::parse_review(a)
+                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                Ok(reviews) => {
+                    for r in reviews {
+                        println!("{:?}", r);
+                    }
+                },
+                Err(_) => {},
+            };
+        },
+    };
 }
 
 fn command_query_assignments(args: &Args) {
@@ -325,13 +358,140 @@ async fn command_review(args: &Args) {
         Ok(())
     }
 
-    async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf) -> Result<(), WaniError> {
+    // TODO - save reviews in another thread
+    async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: &AsyncConnection, web_config: &WaniWebConfig) -> Result<(), WaniError> {
+        let reviews = Arc::new(reviews);
+        let rev = reviews.clone();
+        conn.call(move |conn| {
+            let tx = conn.transaction();
+            if let Err(e) = tx {
+                return Err(tokio_rusqlite::Error::Rusqlite(e));
+            }
+            let mut tx = tx.unwrap();
+            for (_, review) in rev.deref() {
+                let _ = 
+                    match wanisql::store_review(&review, &mut tx) {
+                        Ok(_) => {},
+                        Err(e) => println!("Error storing review: {}", e),
+                    };
+            }
+            tx.commit()?;
+            Ok(())
+        }).await?;
+
+        let mut join_set = tokio::task::JoinSet::new();
+        for (_, review) in reviews.deref() {
+            if let ReviewStatus::Done = review.status {
+                let new_review = wanidata::NewReviewRequest {
+                    review
+                };
+
+                let request = web_config.client
+                    .post("https://api.wanikani.com/v2/reviews/")
+                    .header("Wanikani-Revision", &web_config.revision)
+                    .bearer_auth(&web_config.auth)
+                    .json(&new_review);
+
+                join_set.spawn(request.send());
+            }
+        }
+
+        while let Some(response) = join_set.join_next().await {
+            if let Ok(response) = response {
+                match parse_response(response).await {
+                    Ok((wani, _)) => {
+                        match wani.data {
+                            WaniData::Review(r) => {
+                                let ass_id = r.data.assignment_id;
+                                conn.call(move |conn| {
+                                    conn.execute(wanisql::REMOVE_REVIEW, params![ass_id])?;
+                                    Ok(())
+                                }).await?;
+
+                                if let Some(resources) = wani.resources_updated {
+                                    if let Some(assignment) = resources.assignment {
+                                        conn.call(move |conn| {
+                                            let tx = conn.transaction();
+                                            if let Err(e) = tx {
+                                                return Err(tokio_rusqlite::Error::Rusqlite(e));
+                                            }
+                                            let mut tx = tx.unwrap();
+                                            match wanisql::store_assignment(assignment.data, &mut tx) {
+                                                Ok(_) => {},
+                                                Err(e) => println!("Error storing assignment: {}", e),
+                                            };
+                                            tx.commit()?;
+                                            Ok(())
+                                        }).await?;
+                                    }
+                                }
+                            },
+                            _ => {}
+                        }
+                    },
+                    Err(e) => {
+                        println!("Returned unexpected result when saving review. {}", e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, conn: &AsyncConnection) -> Result<(), WaniError> {
+        assignments.reverse();
+        let batch_size = min(1, assignments.len());
+        let mut batch = Vec::with_capacity(batch_size);
+        assignments.shuffle(&mut thread_rng());
+        for i in (assignments.len() - batch_size..assignments.len()).rev() {
+            batch.push(assignments.remove(i));
+        }
+
+        let mut reviews = HashMap::with_capacity(batch.len());
+        let now = Utc::now();
+        for nr in batch.iter().map(|a| wanidata::NewReview {
+            id: None,
+            assignment_id: a.id,
+            created_at: now,
+            incorrect_meaning_answers: 0,
+            incorrect_reading_answers: 0,
+            status: wanidata::ReviewStatus::NotStarted,
+        }) {
+            reviews.insert(nr.assignment_id, nr);
+        }
+
+        let res =  do_reviews_inner(assignments, subjects, audio_cache, web_config, p_config, image_cache, &mut reviews, &mut batch).await;
+        if let Err(e) = &res {
+            match &e {
+                WaniError::Io(err) => {
+                    match err.kind() {
+                        io::ErrorKind::Interrupted => {
+                            save_reviews(reviews, conn, web_config).await?;
+                            return Ok(())
+                        },
+                        _ => {},
+                    }
+                },
+                _ => {},
+            }
+        }
+
+        save_reviews(reviews, conn, web_config).await?;
+        res
+    }
+
+    async fn do_reviews_inner(assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>) -> Result<(), WaniError> {
         enum AnswerColor {
             Green,
             Red,
             Gray
         }
         let term = Term::buffered_stdout();
+        let total_reviews = assignments.len();
+        let mut done = 0;
+        let mut failed = 0;
+        let mut guesses = 0;
         let rng = &mut thread_rng();
         let width = 80;
         let text_width = 50;
@@ -344,8 +504,9 @@ async fn command_review(args: &Args) {
         let magenta_tag = format!("\x1b[{}m", 5 + 40);
         let cyan_tag = format!("\x1b[{}m", 6 + 40);
         let green_tag = format!("\x1b[{}m", 2 + 40);
-        let gray_tag = format!("\x1b[48;5;{}m", 145);
+        //let gray_tag = format!("\x1b[48;5;{}m", 145);
         let wfmt_args;
+
         if term.features().colors_supported() {
             wfmt_args = wanidata::WaniFmtArgs {
                 radical_args: wanidata::WaniTagArgs {
@@ -377,30 +538,6 @@ async fn command_review(args: &Args) {
         else {
             wfmt_args = wanidata::EMPTY_ARGS;
         }
-
-        assignments.reverse();
-        let total_reviews = assignments.len();
-        let mut done = 0;
-        let mut failed = 0;
-        let mut guesses = 0;
-        let batch_size = min(50, assignments.len());
-        let mut batch = Vec::with_capacity(batch_size);
-        for i in (assignments.len() - batch_size..assignments.len()).rev() {
-            batch.push(assignments.remove(i));
-        }
-
-        let mut reviews = HashMap::with_capacity(batch.len());
-        let now = Utc::now();
-        for nr in batch.iter().map(|a| wanidata::NewReview {
-            assignment_id: a.id,
-            created_at: now,
-            incorrect_meaning_answers: 0,
-            incorrect_reading_answers: 0,
-            status: wanidata::ReviewStatus::NotStarted,
-        }) {
-            reviews.insert(nr.assignment_id, nr);
-        }
-
         let mut input = String::new();
         'subject: loop {
             if batch.is_empty() {
@@ -408,7 +545,7 @@ async fn command_review(args: &Args) {
             }
             batch.shuffle(rng);
             let assignment = batch.last().unwrap();
-            let subj_id = assignment.data.subject_id;
+            //let subj_id = assignment.data.subject_id;
             let review = reviews.get_mut(&assignment.id).unwrap();
             let subject = subjects.get(&assignment.data.subject_id);
             if let None = subject {
@@ -538,6 +675,7 @@ async fn command_review(args: &Args) {
                     wanidata::AnswerResult::BadFormatting => (true, Some("Try again!"), AnswerColor::Gray),
                     wanidata::AnswerResult::KanaWhenMeaning => (true, Some("We want the reading, not the meaning."), AnswerColor::Gray),
                     wanidata::AnswerResult::Correct => {
+                        review.created_at = Utc::now();
                         review.status = match subject {
                             Subject::Radical(_) | Subject::KanaVocab(_) => 
                             {
@@ -878,7 +1016,14 @@ async fn command_review(args: &Args) {
                 return;
             }
 
-            let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap()).await;
+            let _ = ctrlc::set_handler(move || {
+                println!("received Ctrl+C!");
+            });
+            let res = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c).await;
+            match res {
+                Ok(_) => {},
+                Err(e) => {println!("{:?}", e)},
+            }
         },
     };
 }
@@ -886,8 +1031,8 @@ async fn command_review(args: &Args) {
 async fn try_download_text<F>(url: &str, web_config: &WaniWebConfig, path: &PathBuf, modify_content: F) -> Result<(), WaniError> 
 where F: Fn(&str) -> String {
     let request = web_config.client
-        .get(url)
-        .bearer_auth(&web_config.auth);
+        .get(url);
+        //.bearer_auth(&web_config.auth);
 
     match request.send().await {
         Err(_) => {
@@ -914,8 +1059,7 @@ where F: Fn(&str) -> String {
 
 async fn try_download_file(url: &str, web_config: &WaniWebConfig, path: &PathBuf) -> Result<(), WaniError> {
     let request = web_config.client
-        .get(url)
-        .bearer_auth(&web_config.auth);
+        .get(url);
 
     match request.send().await {
         Err(_) => {
@@ -1581,6 +1725,7 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
                 CACHE_TYPE_ASSIGNMENTS, 
               ])?;
 
+    c.execute(wanisql::CREATE_REVIEWS_TBL, [])?;
     c.execute(wanisql::CREATE_RADICALS_TBL, [])?;
     c.execute(wanisql::CREATE_KANJI_TBL, [])?;
     c.execute(wanisql::CREATE_VOCAB_TBL, [])?;
@@ -1637,6 +1782,16 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
                         },
                     }
                 },
+                StatusCode::CREATED => {
+                    let headers = r.headers().to_owned();
+                    let wani = r.json::<WaniResp>().await;
+                    match wani {
+                        Err(s) => Err(format!("Error parsing HTTP 201 response: {}", s)),
+                        Ok(w) => {
+                            Ok((w, headers))
+                        },
+                    }
+                },
                 StatusCode::NOT_MODIFIED => {
                     Ok((WaniResp {
                         url: r.url().to_string(),
@@ -1649,6 +1804,7 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
                                 previous_url: None,
                             },
                         }),
+                        resources_updated: None,
                     }, r.headers().to_owned()))
                 },
                 StatusCode::UNAUTHORIZED => {
@@ -1656,6 +1812,9 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
                 },
                 StatusCode::TOO_MANY_REQUESTS => {
                     Err(format!("Wanikani API rate limit exceeded."))
+                },
+                StatusCode::UNPROCESSABLE_ENTITY => {
+                    Err(format!("Unprocessable Enitity. {}", r.text().await.unwrap_or("Unprocessable Entity.".to_owned())))
                 },
                 _ => { Err(format!("HTTP status code {}", r.status())) },
             }
@@ -1819,7 +1978,10 @@ fn get_program_config(args: &Args) -> Result<ProgramConfig, WaniError> {
         };
     }
 
-    let mut config = ProgramConfig { auth: None, configpath: configpath.clone(), colorblind: false };
+    let mut config = ProgramConfig { 
+        auth: None, 
+        //configpath: configpath.clone(), 
+        colorblind: false };
     if let Ok(lines) = read_lines(&configpath) {
         for line in lines {
             if let Ok(s) = line {

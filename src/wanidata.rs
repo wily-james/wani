@@ -10,7 +10,21 @@ pub struct WaniResp {
     pub url: String,
     pub data_updated_at: Option<String>, // TODO - optional for collections if no elements, mandatory
     #[serde(flatten)]
-    pub data: WaniData
+    pub data: WaniData,
+    pub resources_updated: Option<ResourcesUpdated>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResourcesUpdated {
+    pub assignment: Option<ResourcesUpdatedAssignment>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResourcesUpdatedAssignment {
+    pub url: String,
+    pub data_updated_at: String,
+    #[serde(flatten)]
+    pub data: Assignment,
 }
 
 #[derive(Deserialize, Debug)]
@@ -58,7 +72,7 @@ pub enum Subject
     Vocab(Vocab),
     KanaVocab(KanaVocab),
 }
-
+ 
 #[derive(Deserialize, Debug)]
 pub struct Assignment {
     pub id: i32,
@@ -82,7 +96,12 @@ pub struct AssignmentData {
 
 #[derive(Deserialize, Debug)]
 pub struct Review {
-    pub id: i32,
+    pub id: i64,
+    pub data: ReviewData,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ReviewData {
     pub assignment_id: i32,
     pub created_at: DateTime<Utc>,
     pub ending_srs_stage: u8,
@@ -93,21 +112,57 @@ pub struct Review {
     pub subject_id: i32
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug, Serialize)]
+pub struct NewReviewRequest<'a> {
+    pub review: &'a NewReview,
+}
+
+#[derive(Debug, Serialize)]
 pub struct NewReview {
+    #[serde(skip_serializing)]
+    pub id: Option<i32>,
+
     pub assignment_id: i32,
+
+    #[serde(skip_serializing)]
     pub created_at: DateTime<Utc>,
+
     pub incorrect_meaning_answers: u16,
     pub incorrect_reading_answers: u16,
+
+    #[serde(skip_serializing)]
     pub status: ReviewStatus,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum ReviewStatus {
     NotStarted,
     MeaningDone,
     ReadingDone,
     Done
+}
+
+impl std::convert::Into<usize> for ReviewStatus {
+    fn into(self) -> usize {
+        match self {
+            ReviewStatus::NotStarted => 0,
+            ReviewStatus::MeaningDone => 1,
+            ReviewStatus::ReadingDone => 2,
+            ReviewStatus::Done => 3,
+        }
+    }
+}
+
+impl std::convert::From<usize> for ReviewStatus {
+    fn from(value: usize) -> Self {
+        match value {
+            0 => ReviewStatus::NotStarted,
+            1 => ReviewStatus::MeaningDone,
+            2 => ReviewStatus::ReadingDone,
+            3 => ReviewStatus::Done,
+            _ => panic!(),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
