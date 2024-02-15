@@ -61,7 +61,16 @@ pub(crate) const SELECT_REVIEWS: &str = "select
                             incorrect_meaning_answers,
                             incorrect_reading_answers,
                             status,
-                            available_at from new_reviews;";
+                            available_at from new_reviews where available_at is not null;";
+
+pub(crate) const SELECT_LESSONS: &str = "select 
+                            id,
+                            assignment_id,
+                            created_at,
+                            incorrect_meaning_answers,
+                            incorrect_reading_answers,
+                            status,
+                            available_at from new_reviews where available_at is null;";
 
 pub(crate) const CLEAR_REVIEWS: &str = "delete from new_reviews";
 

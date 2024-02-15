@@ -3,7 +3,9 @@ mod wanisql;
 
 use crate::wanidata::{Assignment, NewReview, PronunciationAudio, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::BufReader;
 use std::io::Write;
 use std::ops::Deref;
@@ -100,6 +102,7 @@ enum Command {
     QueryAssignments,
     QueryUser,
     QueryReviews,
+    QueryLessons,
     ClearReviews,
     TestSubject,
     TestThrottle,
@@ -226,6 +229,7 @@ async fn main() -> Result<(), WaniError> {
                 Command::QueryAssignments => command_query_assignments(&args),
                 Command::QueryUser=> command_query_user(&args),
                 Command::QueryReviews => command_query_reviews(&args),
+                Command::QueryLessons => command_query_lessons(&args),
                 Command::ClearReviews => command_clear_reviews(&args),
                 Command::TestSubject => command_test_subject(&args).await,
                 Command::TestThrottle => command_test_throttle(&args).await,
@@ -277,6 +281,36 @@ fn command_query_user(args: &Args) {
                 Err(e) => {
                     println!("{}", e);
                 },
+            };
+        },
+    };
+}
+
+fn command_query_lessons(args: &Args) {
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
+    match conn {
+        Err(e) => println!("{}", e),
+        Ok(c) => {
+            let mut stmt = c.prepare(wanisql::SELECT_LESSONS).unwrap();
+            match stmt.query_map([], |a| wanisql::parse_review(a)
+                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                Ok(reviews) => {
+                    let mut count = 0;
+                    for r in reviews {
+                        println!("{:?}", r);
+                        count += 1;
+                    }
+
+                    println!("Count: {}", count);
+                },
+                Err(_) => {},
             };
         },
     };
@@ -528,6 +562,99 @@ fn print_lesson_status(subj_counts: &SubjectCounts, term: &Term, width: usize) -
     Ok(())
 }
 
+async fn save_lessons(reviews: HashMap<i32, NewReview>, rate_limit: &RateLimitBox, web_config: &WaniWebConfig, conn: &AsyncConnection) -> Result<(), WaniError> {
+    let reviews = Arc::new(reviews);
+    let rev = reviews.clone();
+    conn.call(move |conn| {
+        let tx = conn.transaction();
+        if let Err(e) = tx {
+            return Err(tokio_rusqlite::Error::Rusqlite(e));
+        }
+        let mut tx = tx.unwrap();
+        for (_, review) in rev.deref() {
+            let _ = tx.execute(wanisql::REMOVE_REVIEW, [review.assignment_id]);
+        }
+        for (_, review) in rev.deref() {
+            let _ = 
+                match wanisql::store_review(&review, &mut tx) {
+                    Ok(_) => {},
+                    Err(e) => println!("Error saving review locally: {}", e),
+                };
+        }
+        tx.commit()?;
+        Ok(())
+    }).await?;
+
+    save_lessons_to_wanikani(reviews.iter().map(|t| t.1), rate_limit, web_config, conn).await
+}
+
+async fn save_lessons_to_wanikani<'a, I>(lessons: I, rate_limit: &RateLimitBox, web_config: &WaniWebConfig, conn: &AsyncConnection) -> Result<(), WaniError> 
+where I: Iterator<Item = &'a NewReview> {
+    let mut join_set = JoinSet::new();
+    let mut saved_assignments = vec![];
+    for review in lessons {
+        if let ReviewStatus::Done = review.status {
+            let started_at = review.created_at.to_rfc3339();
+            let url = format!("https://api.wanikani.com/v2/assignments/{}/start", review.assignment_id);
+            let info = RequestInfo {
+                url,
+                method: RequestMethod::Put,
+                json: Some(serde_json::json!({
+                    "started_at": started_at,
+                })),
+                ..Default::default()
+            };
+
+            let rate_limit = rate_limit.clone();
+            let web_config = web_config.clone();
+            join_set.spawn(async move {
+                return send_throttled_request(info, rate_limit, web_config).await
+            });
+        }
+    }
+
+    while let Some(response) = join_set.join_next().await {
+        if let Ok(response) = response {
+            match response {
+                Ok((wani, _)) => {
+                    match wani.data {
+                        WaniData::Assignment(a) => {
+                            conn.call(move |conn| {
+                                conn.execute(wanisql::REMOVE_REVIEW, params![a.id])?;
+                                Ok(())
+                            }).await?;
+                            saved_assignments.push(a);
+                        },
+                        _ => {}
+
+                    }
+                },
+                Err(e) => {
+                    println!("{}", e);
+                }
+            }
+        }
+    }
+
+    for a in saved_assignments {
+        conn.call(move |conn| {
+            let tx = conn.transaction();
+            if let Err(e) = tx {
+                return Err(tokio_rusqlite::Error::Rusqlite(e));
+            }
+            let mut tx = tx.unwrap();
+            match wanisql::store_assignment(a, &mut tx) {
+                Ok(_) => {},
+                Err(e) => println!("Error storing assignment: {}", e),
+            };
+            tx.commit()?;
+            Ok(())
+        }).await?;
+    }
+
+    Ok(())
+}
+
 // TODO - save reviews in another thread
 async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: &AsyncConnection, web_config: &WaniWebConfig, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
     let reviews = Arc::new(reviews);
@@ -551,7 +678,6 @@ async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: &AsyncConnection, 
         tx.commit()?;
         Ok(())
     }).await?;
-
 
     save_reviews_to_wanikani(reviews.deref().iter().map(|t| t.1), rate_limit, web_config, conn).await?;
     Ok(())
@@ -683,11 +809,39 @@ async fn command_lesson(args: &Args) {
                 println!("Error loading assignments. Error: {}", e);
                 return;
             };
-            let mut assignments = assignments.unwrap();
+            let assignments = assignments.unwrap();
             if assignments.len() == 0 {
                 println!("No assignments for now.");
                 return;
             }
+
+            let existing_lessons = load_existing_lessons(&c, &assignments).await;
+            let existing_lessons = match existing_lessons {
+                Ok(existing_reviews) => { 
+                    existing_reviews 
+                },
+                Err(e) => {
+                    println!("Error loading existing lessons: {}", e);
+                    LoadedReviews::default()
+                },
+            };
+
+            for review in existing_lessons.invalid_reviews {
+                let _ = c.call(move |conn| {
+                    conn.execute(wanisql::REMOVE_REVIEW, params![review.assignment_id])?;
+                    Ok(())
+                }).await;
+            }
+
+            let _ = save_lessons_to_wanikani(existing_lessons.finished_reviews.iter(), &rate_limit, &web_config, &c).await;
+
+            let mut use_assignments = Vec::with_capacity(assignments.len());
+            for a in assignments {
+                if let None = existing_lessons.finished_reviews.iter().find(|r| r.assignment_id == a.id) {
+                    use_assignments.push(a);
+                }
+            }
+            let mut assignments = use_assignments;
 
             let subjects_by_id = get_subjects_for_assignments(&assignments, &c).await;
             if let Err(e) = subjects_by_id {
@@ -909,45 +1063,13 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
             incorrect_meaning_answers: 0,
             incorrect_reading_answers: 0,
             status: wanidata::ReviewStatus::NotStarted,
-            available_at: a.data.available_at,
+            available_at: None, // Lesson reviews should not be available
         });
     }
 
     do_reviews_inner(subjects, web_config, p_config, image_cache, &mut reviews, &mut batch, subj_counts, audio_tx, conn).await?;
 
-    let mut join_set = JoinSet::new();
-    for (_, review) in reviews {
-        if let ReviewStatus::Done = review.status {
-            let started_at = review.created_at.to_rfc3339();
-            let url = format!("https://api.wanikani.com/v2/assignments/{}/start", review.assignment_id);
-            let info = RequestInfo {
-                url,
-                method: RequestMethod::Put,
-                json: Some(serde_json::json!({
-                    "started_at": started_at,
-                })),
-                ..Default::default()
-            };
-
-            let rate_limit = rate_limit.clone();
-            let web_config = web_config.clone();
-            join_set.spawn(async move {
-                return send_throttled_request(info, rate_limit, web_config).await
-            });
-        }
-
-        while let Some(response) = join_set.join_next().await {
-            if let Ok(response) = response {
-                match response {
-                    Ok((_, _)) => {
-                    },
-                    Err(e) => {
-                        println!("{}", e);
-                    }
-                }
-            }
-        }
-    }
+    let _ = save_lessons(reviews, rate_limit, web_config, conn).await;
 
     Ok(())
 }
@@ -1320,8 +1442,10 @@ fn get_wfmt_args(term: &Term) -> WaniFmtArgs {
 async fn command_review(args: &Args) {
     async fn do_reviews(assignments: &mut Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, conn: &AsyncConnection, rate_limit: &RateLimitBox, first_batch: Option<Vec<(Assignment, NewReview)>>) -> Result<(), WaniError> {
         assignments.reverse();
+        let total_assignments = assignments.len() + if let Some(batch) = &first_batch { batch.len() } else { 0 };
         let mut first_batch = first_batch;
-        let batch_size = min(20, assignments.len());
+        let ideal_batch_size = 20;
+        let mut batch_size = min(ideal_batch_size, total_assignments);
         let (audio_tx, mut rx) = mpsc::channel::<AudioMessage>(5);
         let audio_web_config = web_config.clone();
         let audio_task = tokio::spawn(async move {
@@ -1338,16 +1462,21 @@ async fn command_review(args: &Args) {
 
         let mut review_result = None;
         let mut first_reviews = None;
-
-        let total_assignments = assignments.len() + if let Some(batch) = &first_batch { batch.len() } else { 0 };
         let stats = ReviewStats {
             total_reviews: total_assignments,
             ..Default::default()
         };
         let mut stats = ReviewType::Review(stats);
-        while assignments.len() > 0 {
+        loop {
+            if let None = first_batch {
+                if assignments.len() == 0 {
+                    break;
+                }
+            }
+
             let mut batch = match first_batch { 
                 None => { 
+                    batch_size = min(ideal_batch_size, assignments.len());
                     let mut b = Vec::with_capacity(batch_size);
                     assignments.shuffle(&mut thread_rng());
                     for i in (assignments.len() - batch_size..assignments.len()).rev() {
@@ -1474,12 +1603,10 @@ async fn command_review(args: &Args) {
                 }).await;
             }
 
-            let res = save_reviews_to_wanikani(existing_reviews.finished_reviews.iter(), &rate_limit, &web_config, &c).await;
-            if let Ok(saved_reviews) = res {
-                for review in saved_reviews {
-                    if let Some(t) = assignments.iter().find_position(|a| a.id == review.data.assignment_id) {
-                        assignments.remove(t.0);
-                    }
+            let _ = save_reviews_to_wanikani(existing_reviews.finished_reviews.iter(), &rate_limit, &web_config, &c).await;
+            for review in existing_reviews.finished_reviews.iter() {
+                if let Some(t) = assignments.iter().find_position(|a| a.id == review.assignment_id) {
+                    assignments.remove(t.0);
                 }
             }
 
@@ -1800,7 +1927,6 @@ async fn get_lesson_info_lines(subject: &Subject, card_page: usize, wfmt_args: &
                 0 => {
                     let mut lines = vec![];
                     let mnemonic = wanidata::format_wani_text(&r.data.meaning_mnemonic, wfmt_args);
-                    lines.push("---".to_owned());
                     split_str_by_len(&mnemonic, text_width, &mut lines);
                     lines
                 },
@@ -2490,11 +2616,55 @@ fn split_str_by_len(s: &str, l: usize, v: &mut Vec<String>) {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct LoadedReviews {
     invalid_reviews: Vec<NewReview>,
     finished_reviews: Vec<NewReview>,
     in_progress_reviews: Vec<NewReview>,
+}
+
+async fn load_existing_lessons(c: &AsyncConnection, assignments: &Vec<wanidata::Assignment>) -> Result<LoadedReviews, tokio_rusqlite::Error> {
+    let assignments: HashSet<i32, RandomState> = HashSet::from_iter(assignments.iter().map(|a| a.id));
+
+    return c.call(move |c| { 
+        let stmt = c.prepare(wanisql::SELECT_LESSONS);
+        match stmt {
+            Err(e) => {
+                return Err(tokio_rusqlite::Error::Rusqlite(e));
+            },
+            Ok(mut stmt) => {
+                match stmt.query_map([], |r| parse_review(r)
+                                     .or_else
+                                     (|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                    Ok(reviews) => {
+                        let mut loaded = LoadedReviews::default(); 
+                        for r in reviews {
+                            if let Err(r) = r {
+                                println!("Error loading review: {}", r);
+                                continue;
+                            }
+                            let r = r.unwrap();
+
+                            if let ReviewStatus::Done = r.status {
+                                if assignments.contains(&r.assignment_id) {
+                                    loaded.finished_reviews.push(r);
+                                }
+                                else {
+                                    loaded.invalid_reviews.push(r);
+                                }
+                            }
+                            else {
+                                loaded.invalid_reviews.push(r);
+                            }
+                        }
+
+                        Ok(loaded)
+                    },
+                    Err(e) => {Err(tokio_rusqlite::Error::Rusqlite(e))},
+                }
+            }
+        }
+    }).await;
 }
 
 async fn load_existing_reviews(c: &AsyncConnection, assignments: &Vec<wanidata::Assignment>) -> Result<LoadedReviews, tokio_rusqlite::Error> {
@@ -3126,7 +3296,6 @@ fn setup_db(c: &Connection) -> Result<(), SqlError> {
                 CACHE_TYPE_USER, 
               ])?;
 
-    c.execute("drop table assignments;", [])?;
     c.execute(wanisql::CREATE_REVIEWS_TBL, [])?;
     c.execute(wanisql::CREATE_RADICALS_TBL, [])?;
     c.execute(wanisql::CREATE_KANJI_TBL, [])?;
