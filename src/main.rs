@@ -203,7 +203,7 @@ async fn main() -> Result<(), WaniError> {
             match c {
                 Command::Summary => command_summary(&args).await,
                 Command::S => command_summary(&args).await,
-                Command::Init => command_init(&args),
+                Command::Init => command_init(&get_program_config(&args)?),
                 Command::Sync => command_sync(&args, false).await,
                 Command::ForceSync => command_sync(&args, true).await,
                 Command::Review => command_review(&args).await,
@@ -659,7 +659,7 @@ async fn command_review(args: &Args) {
             save_reviews(reviews, conn, web_config, rate_limit).await?;
         }
 
-        audio_task.await?;
+        audio_task.abort();
         review_result.unwrap_or(Ok(()))
     }
 
@@ -1061,10 +1061,10 @@ async fn command_review(args: &Args) {
                     ass_cache_info = info;
                 }
             }
-            println!("Syncing assignments. . .");
             let _ = sync_assignments(&c, &web_config, ass_cache_info, &rate_limit).await;
 
             let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, [Utc::now().timestamp()]).await;
+
             if let Err(e) = assignments {
                 println!("Error loading assignments. Error: {}", e);
                 return;
@@ -1273,6 +1273,21 @@ async fn command_review(args: &Args) {
             let _ = ctrlc::set_handler(move || {
                 println!("\nreceived Ctrl+C!\nSaving reviews...");
             });
+
+            let mut missing_subjs = false; 
+            for ass in &assignments {
+                if !subjects_by_id.contains_key(&ass.data.subject_id) {
+                    missing_subjs = true;
+                    break;
+                }
+            }
+            if missing_subjs {
+                println!("Some subject data is missing. You may need to run 'wani sync'");
+                assignments = assignments
+                    .into_iter()
+                    .filter(|a| subjects_by_id.contains_key(&a.data.subject_id))
+                    .collect_vec();
+            }
 
             let res = do_reviews(&mut assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit, first_batch).await;
             match res {
@@ -2359,19 +2374,12 @@ async fn update_cache(last_modified: Option<&str>, cache_type: usize, last_reque
     }).await;
 }
 
-fn command_init(args: &Args) {
-    let p_config = get_program_config(args);
-    if let Err(e) = &p_config {
-        println!("{}", e);
-        return;
-    }
-    let p_config = p_config.unwrap();
-
+fn command_init(p_config: &ProgramConfig) {
     let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
-            match setup_db(c) {
+            match setup_db(&c) {
                 Ok(_) => {},
                 Err(e) => {
                     println!("Error setting up SQLite DB: {}", e.to_string())
@@ -2384,7 +2392,7 @@ fn command_init(args: &Args) {
 const CACHE_TYPE_SUBJECTS: usize = 0;
 const CACHE_TYPE_ASSIGNMENTS: usize = 1;
 
-fn setup_db(c: Connection) -> Result<(), SqlError> {
+fn setup_db(c: &Connection) -> Result<(), SqlError> {
     // Arrays of non-id'ed objects will be stored as json
     // Arrays of ints will be stored as json "[1,2,3]"
     
@@ -2410,11 +2418,8 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
     c.execute(wanisql::CREATE_VOCAB_TBL, [])?;
     c.execute(wanisql::CREATE_KANA_VOCAB_TBL, [])?;
     c.execute(wanisql::CREATE_ASSIGNMENTS_TBL, [])?;
-
-    match c.close() {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e.1),
-    }
+    c.execute(wanisql::CREATE_ASSIGNMENTS_INDEX, [])?;
+    Ok(())
 }
 async fn command_test_throttle(args: &Args) {
     let p_config = get_program_config(args);
@@ -2692,6 +2697,7 @@ async fn command_summary(args: &Args) {
     let p_config = get_program_config(args);
     if let Err(e) = &p_config {
         println!("{}", e);
+        return;
     }
     let p_config = p_config.unwrap();
     let web_config = get_web_config(&p_config);
@@ -2793,12 +2799,29 @@ fn get_db_path(p_config: &ProgramConfig) -> Result<PathBuf, WaniError> {
 }
 
 async fn setup_async_connection(p_config: &ProgramConfig) -> Result<AsyncConnection, WaniError> {
-    Ok(AsyncConnection::open(&get_db_path(p_config)?).await?)
+    let path = get_db_path(p_config)?;
+    if !path.exists() {
+        let _ = setup_connection(p_config);
+    }
+    let res = AsyncConnection::open(&path).await;
+    Ok(res?)
 }
 
-fn setup_connection(p_config: &ProgramConfig    ) -> Result<Connection, WaniError> {
-    match Connection::open(&get_db_path(p_config)?) {
-        Ok(c) => Ok(c),
+fn setup_connection(p_config: &ProgramConfig) -> Result<Connection, WaniError> {
+    let path = get_db_path(p_config)?;
+    let do_init = !path.exists();
+    match Connection::open(&path) {
+        Ok(c) => {
+            if do_init {
+                match setup_db(&c) {
+                    Ok(_) => {},
+                    Err(e) => {
+                        println!("Error setting up SQLite DB: {}", e.to_string())
+                    },
+                }
+            }
+            Ok(c)
+        },
         Err(e) => Err(WaniError::Generic(format!("{}", e))),
     }
 }

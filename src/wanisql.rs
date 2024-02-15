@@ -102,6 +102,10 @@ pub(crate) const CREATE_ASSIGNMENTS_TBL: &str = "create table if not exists assi
             subject_type integer not null
         )";
 
+pub(crate) const CREATE_ASSIGNMENTS_INDEX: &str = 
+    "create index if not exists idx_available_at 
+        on assignments (available_at);";
+
 pub(crate) const INSERT_ASSIGNMENT: &str = "replace into assignments
                             (id,
                              available_at,
