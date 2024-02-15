@@ -56,6 +56,7 @@ enum Command {
     QueryRadicals,
     QueryKanji,
     QueryVocab,
+    QueryKanaVocab,
     TestSubject,
 }
 
@@ -107,6 +108,7 @@ async fn main() -> Result<(), WaniError> {
                 Command::QueryRadicals => command_query_radicals(&args),
                 Command::QueryKanji => command_query_kanji(&args),
                 Command::QueryVocab => command_query_vocab(&args),
+                Command::QueryKanaVocab => command_query_kana_vocab(&args),
                 Command::TestSubject => command_test_subject(&args).await,
             };
         },
@@ -114,6 +116,27 @@ async fn main() -> Result<(), WaniError> {
     };
 
     Ok(())
+}
+
+fn command_query_kana_vocab(args: &Args) {
+    let conn = setup_connection(&args);
+    match conn {
+        Err(e) => println!("{}", e),
+        Ok(c) => {
+            let mut stmt = c.prepare(wanisql::SELECT_ALL_KANA_VOCAB).unwrap();
+            match stmt.query_map([], |v| wanisql::parse_kana_vocab(v)
+                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                Ok(kana_vocab) => {
+                    for v in kana_vocab {
+                        println!("{:?}", v)
+                    }
+                },
+                Err(_) => {},
+            };
+        },
+    };
+
+
 }
 
 fn command_query_vocab(args: &Args) {
@@ -342,7 +365,27 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
                                 }
                             }
 
-                            let this_res_count = rad_len + kanji_len + vocab_len + kana_vocab.len() - parse_fails;
+                            let stmt_res = conn.prepare(wanisql::INSERT_KANA_VOCAB);
+                            let kana_vocab_len = kana_vocab.len();
+                            match stmt_res {
+                                Ok(mut stmt) => {
+                                    for v in kana_vocab {
+                                        match wanisql::store_kana_vocab(v, &mut stmt) {
+                                            Err(e) => {
+                                                println!("Error inserting into kana vocab.\n{}", e);
+                                                parse_fails += 1;
+                                            }
+                                            Ok(_) => {},
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    println!("Error preparing insert into kana vocab statement. Error: {}", e);
+                                    parse_fails += kana_vocab_len;
+                                }
+                            }
+
+                            let this_res_count = rad_len + kanji_len + vocab_len + kana_vocab_len - parse_fails;
                             updated_resources += this_res_count;
                             total_parse_fails += parse_fails;
 

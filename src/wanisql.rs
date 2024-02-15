@@ -360,3 +360,88 @@ pub(crate) const CREATE_KANA_VOCAB_TBL: &str = "create table if not exists kana_
             parts_of_speech text not null,
             pronunciation_audios text not null
         )";
+
+pub(crate) const INSERT_KANA_VOCAB: &str = "replace into kana_vocab
+                            (id,
+                             aux_meanings,
+                             created_at,
+                             document_url,
+                             hidden_at,
+                             lesson_position,
+                             level,
+                             meaning_mnemonic,
+                             meanings,
+                             slug,
+                             srs_id,
+                             characters,
+                             context_sentences,
+                             parts_of_speech,
+                             pronunciation_audios)
+                            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
+
+pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Statement<'_>) -> Result<usize, rusqlite::Error>
+{
+    let p = rusqlite::params!(
+        format!("{}", v.id),
+        serde_json::to_string(&v.data.aux_meanings).unwrap(),
+        v.data.created_at.to_rfc3339(),
+        v.data.document_url,
+        if let Some(hidden_at) = v.data.hidden_at { Some(hidden_at.to_rfc3339()) } else { None },
+        format!("{}", v.data.lesson_position),
+        format!("{}", v.data.level),
+        v.data.meaning_mnemonic,
+        serde_json::to_string(&v.data.meanings).unwrap(),
+        v.data.slug,
+        format!("{}", v.data.spaced_repetition_system_id),
+        v.data.characters,
+        serde_json::to_string(&v.data.context_sentences).unwrap(),
+        serde_json::to_string(&v.data.parts_of_speech).unwrap(),
+        serde_json::to_string(&v.data.pronunciation_audios).unwrap()
+        );
+    return stmt.execute(p);
+}
+
+pub(crate) const SELECT_ALL_KANA_VOCAB: &str = "select id,
+                             aux_meanings,
+                             created_at,
+                             document_url,
+                             hidden_at,
+                             lesson_position,
+                             level,
+                             meaning_mnemonic,
+                             meanings,
+                             slug,
+                             srs_id,
+                             characters,
+                             context_sentences,
+                             parts_of_speech,
+                             pronunciation_audios from kana_vocab;";
+
+pub(crate) fn parse_kana_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::KanaVocab, WaniError> {
+    return Ok(wanidata::KanaVocab {
+        id: v.get::<usize, i32>(0)?,
+        data: wanidata::KanaVocabData { 
+            aux_meanings: serde_json::from_str::<Vec<AuxMeaning>>(&v.get::<usize, String>(1)?)?,
+            created_at: DateTime::parse_from_rfc3339(&v.get::<usize, String>(2)?)?.with_timezone(&Utc),
+            document_url: v.get::<usize, String>(3)?, 
+            hidden_at: 
+                if let Some(t) = v.get::<usize, Option<String>>(4)? { 
+                    println!("Hidden at: {}", t);
+                    Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
+                } 
+                else { 
+                    None 
+                },
+            lesson_position: v.get::<usize, i32>(5)?, 
+            level: v.get::<usize, i32>(6)?, 
+            meaning_mnemonic: v.get::<usize, String>(7)?, 
+            meanings: serde_json::from_str::<Vec<wanidata::Meaning>>(&v.get::<usize, String>(8)?)?, 
+            slug: v.get::<usize, String>(9)?, 
+            spaced_repetition_system_id: v.get::<usize, i32>(10)?, 
+            characters: v.get::<usize, String>(11)?, 
+            context_sentences: serde_json::from_str::<Vec<ContextSentence>>(&v.get::<usize, String>(12)?)?, 
+            parts_of_speech: serde_json::from_str::<Vec<String>>(&v.get::<usize, String>(13)?)?, 
+            pronunciation_audios: serde_json::from_str::<Vec<PronunciationAudio>>(&v.get::<usize, String>(14)?)?, 
+        }
+    });
+}
