@@ -161,6 +161,11 @@ impl Display for WaniError {
     }
 }
 
+struct SyncResult {
+    success_count: usize,
+    fail_count: usize,
+}
+
 struct AudioMessage {
     send_time: std::time::Instant,
     id: i32,
@@ -425,7 +430,7 @@ async fn command_review(args: &Args) {
                     json: Some(new_review),
                 };
 
-                
+               
                 let rate_limit = rate_limit.clone();
                 let web_config = web_config.clone();
                 join_set.spawn(async move {
@@ -925,6 +930,12 @@ async fn command_review(args: &Args) {
                 //sync_all(&wc, &c, false).await;
             //}
             
+            let mut c_infos = get_all_cache_infos(&c, false).await;
+            if let Ok(c_infos) = &mut c_infos {
+                println!("Syncing assignments. . .");
+                let _ = sync_assignments(&c, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()})).await;
+            }
+
             let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, [Utc::now().timestamp()]).await;
             if let Err(e) = assignments {
                 println!("Error loading assignments. Error: {}", e);
@@ -1495,91 +1506,85 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
     };
 }
 
-async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cache: bool) {
-    struct SyncResult {
-        success_count: usize,
-        fail_count: usize,
-    }
+async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, cache_info: CacheInfo) -> Result<SyncResult, WaniError> {
+    let mut next_url = Some("https://api.wanikani.com/v2/assignments".to_owned());
 
-    async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, cache_info: CacheInfo) -> Result<SyncResult, WaniError> {
-        let mut next_url = Some("https://api.wanikani.com/v2/assignments".to_owned());
+    let mut assignments = vec![];
+    let mut last_request_time: Option<DateTime<Utc>> = None;
+    while let Some(url) = next_url {
+        next_url = None;
+        let mut request = web_config.client
+            .get(url)
+            .header("Wanikani-Revision", &web_config.revision)
+            .bearer_auth(&web_config.auth);
 
-        let mut assignments = vec![];
-        let mut last_request_time: Option<DateTime<Utc>> = None;
-        while let Some(url) = next_url {
-            next_url = None;
-            let mut request = web_config.client
-                .get(url)
-                .header("Wanikani-Revision", &web_config.revision)
-                .bearer_auth(&web_config.auth);
+        if let Some(updated_after) = &cache_info.updated_after {
+            request = request.query(&[("updated_after", updated_after)]);
+        }
 
-            if let Some(updated_after) = &cache_info.updated_after {
-                request = request.query(&[("updated_after", updated_after)]);
-            }
-
-            last_request_time = Some(Utc::now());
-            match parse_response(request.send().await).await {
-                Ok(t) => {
-                    match t.0.data {
-                        WaniData::Collection(c) => {
-                            next_url = c.pages.next_url;
-                            for wd in c.data {
-                                match wd {
-                                    WaniData::Assignment(a) => {
-                                        assignments.push(a);
-                                    },
-                                    _ => {},
-                                }
+        last_request_time = Some(Utc::now());
+        match parse_response(request.send().await).await {
+            Ok(t) => {
+                match t.0.data {
+                    WaniData::Collection(c) => {
+                        next_url = c.pages.next_url;
+                        for wd in c.data {
+                            match wd {
+                                WaniData::Assignment(a) => {
+                                    assignments.push(a);
+                                },
+                                _ => {},
                             }
-                        },
-                        _ => {
-                            last_request_time = None; // clear last request time to avoid invalidate
-                                                      // cache
-                            println!("Unexpected response when fetching assignment data. {:?}", t.0.data);
-                        },
-                    }
-                },
-                Err(e) => {
-                    println!("Failed to fetch current assignment data. Error: {}", e);
-                    return Err(e);
+                        }
+                    },
+                    _ => {
+                        last_request_time = None; // clear last request time to avoid invalidate
+                                                  // cache
+                        println!("Unexpected response when fetching assignment data. {:?}", t.0.data);
+                    },
                 }
+            },
+            Err(e) => {
+                return Err(e);
             }
         }
-
-        let ass_count = assignments.len();
-        let ass_fail = conn.call(|c| {
-            let tx = c.transaction();
-            if let Err(e) = tx {
-                return Err(tokio_rusqlite::Error::Rusqlite(e));
-            }
-            let mut tx = tx.unwrap();
-            let mut ass_fail = 0;
-            for ass in assignments {
-                match wanisql::store_assignment(ass, &mut tx) {
-                    Ok(_) => {},
-                    Err(_) => ass_fail += 1,
-                };
-            }
-            tx.commit()?;
-            Ok(ass_fail)
-        }).await?; // Await this before updating cache so we don't update cache if there's a
-                   // problem inserting
-
-        if let Some(time) = last_request_time {
-            match update_cache(None, CACHE_TYPE_ASSIGNMENTS, time, &conn).await {
-                Ok(_) => (),
-                Err(e) => { 
-                    println!("Failed to update assignment cache. Error: {}", e);
-                },
-            }
-        }
-
-        return Ok(SyncResult {
-            success_count: ass_count,
-            fail_count: ass_fail,
-        });
     }
 
+    let ass_count = assignments.len();
+    let ass_fail = conn.call(|c| {
+        let tx = c.transaction();
+        if let Err(e) = tx {
+            return Err(tokio_rusqlite::Error::Rusqlite(e));
+        }
+        let mut tx = tx.unwrap();
+        let mut ass_fail = 0;
+        for ass in assignments {
+            match wanisql::store_assignment(ass, &mut tx) {
+                Ok(_) => {},
+                Err(_) => ass_fail += 1,
+            };
+        }
+        tx.commit()?;
+        Ok(ass_fail)
+    }).await?; // Await this before updating cache so we don't update cache if there's a
+               // problem inserting
+
+    if let Some(time) = last_request_time {
+        match update_cache(None, CACHE_TYPE_ASSIGNMENTS, time, &conn).await {
+            Ok(_) => (),
+            Err(e) => { 
+                println!("Failed to update assignment cache. Error: {}", e);
+            },
+        }
+    }
+
+    return Ok(SyncResult {
+        success_count: ass_count,
+        fail_count: ass_fail,
+    });
+}
+
+async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cache: bool) {
     async fn sync_subjects(conn: &AsyncConnection, 
                            web_config: &WaniWebConfig, subjects_cache: CacheInfo) -> Result<SyncResult, WaniError> {
         let mut next_url: Option<String> = Some("https://api.wanikani.com/v2/subjects".into());
