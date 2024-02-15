@@ -53,7 +53,23 @@ export WANI_CONFIG_PATH=/some/path
 Sample .wani.conf file:
 
 ```
-auth: your_auth_token # Your WaniKani personal API token. See https://www.wanikani.com/settings/personal_access_tokens
-colorblind: true # Enable some minimal accessibility features for red-green colorblindness
-datapath: /some/path # Specify an alternate location for your local cache of WaniKani subject data
+auth: your_auth_token
+colorblind: true
+datapath: /some/path
 ```
+
+Option explanations:
+```
+auth: your_auth_token
+```
+Specify your WaniKani personal API token. See https://www.wanikani.com/settings/personal_access_tokens
+
+```
+colorblind: true
+``` 
+Enable some minimal accessibility features for red-green colorblindness.
+
+```
+datapath: /some/path
+``` 
+Specify an alternate location for your local cache of WaniKani subject data.
