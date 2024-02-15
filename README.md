@@ -58,20 +58,19 @@ colorblind: true
 datapath: /some/path
 ```
 
-Option explanations:
+#### Option explanations:
+Specify your WaniKani personal API token. See https://www.wanikani.com/settings/personal_access_tokens
 ```
 auth: your_auth_token
 ```
-Specify your WaniKani personal API token. See https://www.wanikani.com/settings/personal_access_tokens
   
 
+Enable some minimal accessibility features for red-green colorblindness.
 ```
 colorblind: true
 ``` 
-Enable some minimal accessibility features for red-green colorblindness.
   
-
+Specify an alternate location for your local cache of WaniKani subject data.
 ```
 datapath: /some/path
 ``` 
-Specify an alternate location for your local cache of WaniKani subject data.
