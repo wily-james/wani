@@ -260,9 +260,9 @@ fn command_query_radicals(args: &Args) {
 }
 
 async fn command_review(args: &Args) {
-    fn print_review_screen(term: &Term, done: usize, failed: usize, total_reviews: usize, width: usize, align: console::Alignment, char_line: &str, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
+    fn print_review_screen(term: &Term, done: usize, guesses: usize, failed: usize, total_reviews: usize, width: usize, align: console::Alignment, char_line: &str, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
         term.clear_screen()?;
-        let correct_percentage = if done == 0 { 100 } else { ((done as f64 - failed as f64) / done as f64 * 100.0) as i32 };
+        let correct_percentage = if guesses == 0 { 100 } else { ((guesses as f64 - failed as f64) / guesses as f64 * 100.0) as i32 };
         term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", 
                                          Emoji("\u{1F44D}", "Correct"), correct_percentage, 
                                          Emoji("\u{2705}", "Done"), done, 
@@ -325,6 +325,7 @@ async fn command_review(args: &Args) {
             let total_reviews = assignments.len();
             let mut done = 0;
             let mut failed = 0;
+            let mut guesses = 0;
             let batch_size = min(50, assignments.len());
             let mut batch = Vec::with_capacity(batch_size);
             for i in (assignments.len() - batch_size..assignments.len()).rev() {
@@ -396,7 +397,7 @@ async fn command_review(args: &Args) {
 
                 // Print status line
                 let mut toast = None;
-                print_review_screen(&term, done, failed, total_reviews, width, align, &char_line, review_type_text, &toast, "")?;
+                print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, "")?;
                 term.move_cursor_to(width / 2, 3)?;
                 term.flush()?;
 
@@ -418,7 +419,7 @@ async fn command_review(args: &Args) {
                         };
 
                         let input_padded = pad_str(&input, width, align, None);
-                        print_review_screen(&term, done, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_padded)?;
+                        print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_padded)?;
                         term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
                         term.flush()?;
                     }
@@ -469,6 +470,7 @@ async fn command_review(args: &Args) {
                             (false, None, true)
                         },
                         wanidata::AnswerResult::Incorrect => {
+                            failed += 1;
                             if is_meaning {
                                 review.incorrect_meaning_answers += 1;
                             }
@@ -481,6 +483,10 @@ async fn command_review(args: &Args) {
                     };
                     toast = tuple.1;
 
+                    if !tuple.0 {
+                        guesses += 1;
+                    }
+
                     let input_line = pad_str(&input, width, align, None);
                     let input_formatted;
                     if tuple.2 {
@@ -489,7 +495,7 @@ async fn command_review(args: &Args) {
                     else {
                         input_formatted = style(input_line.deref()).white().on_red().to_string();
                     }
-                    print_review_screen(&term, done, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
+                    print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
                     term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
                     term.flush()?;
 
@@ -510,7 +516,7 @@ async fn command_review(args: &Args) {
                         }
 
 
-                        print_review_screen(&term, done, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
+                        print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
                         if showing_info {
                             let lines = match subject {
                                 Subject::Radical(r) => {
