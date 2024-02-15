@@ -12,6 +12,14 @@ This is an unofficial WaniKani client. Use at your own risk.
 
 ## INSTALL
 
+### From Source
+With [rust/cargo](https://www.rust-lang.org/tools/install) installed:
+```
+cargo install --git https://github.com/wily-james/wani.git
+```
+
+### Binaries
+
 TODO
 
 ## USE
