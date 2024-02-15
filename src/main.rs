@@ -322,6 +322,8 @@ async fn command_review(args: &Args) {
         let width = 80;
         let text_width = 50;
         let align = console::Alignment::Center;
+        let correct_msg = if p_config.colorblind { Some("Correct") } else { None };
+        let incorrect_msg = if p_config.colorblind { Some("Inorrect") } else { None };
         let blue_tag = format!("\x1b[{}m", 4 + 40);
         let red_tag = format!("\x1b[{}m", 1 + 40);
         let magenta_tag = format!("\x1b[{}m", 5 + 40);
@@ -514,8 +516,7 @@ async fn command_review(args: &Args) {
                                 }
                             },
                         };
-                        let tag = if p_config.colorblind { Some("Correct") } else { None };
-                        (false, tag, true)
+                        (false, correct_msg, true)
                     },
                     wanidata::AnswerResult::Incorrect => {
                         failed += 1;
@@ -525,8 +526,7 @@ async fn command_review(args: &Args) {
                         else {
                             review.incorrect_reading_answers += 1;
                         }
-                        let tag = if p_config.colorblind { Some("Incorrect") } else { None };
-                        (false, tag, false)
+                        (false, incorrect_msg, false)
                     },
                     wanidata::AnswerResult::MatchesNonAcceptedAnswer => (true, Some("Answer not accepted. Try again"), false),
                 };
