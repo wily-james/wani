@@ -332,9 +332,12 @@ fn command_query_reviews(args: &Args) {
             match stmt.query_map([], |a| wanisql::parse_review(a)
                                  .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
                 Ok(reviews) => {
+                    let mut count = 0;
                     for r in reviews {
                         println!("{:?}", r);
+                        count += 1;
                     }
+                    println!("Count: {}", count);
                 },
                 Err(_) => {},
             };
@@ -971,6 +974,12 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
         let assignment = &batch[index];
         let subject = subjects.get(&assignment.data.subject_id).unwrap();
         let characters = get_chars_for_subj(&subject, image_cache, radical_width, web_config).await;
+        if let Err(_) = characters {
+            index += 1;
+            continue 'flashcards;
+        }
+        let characters = characters.unwrap();
+
         let padded_chars = characters.iter().map(|l| pad_str(l, width, align, None));
         let char_line = padded_chars.map(|pc| match subject {
             Subject::Radical(_) => style(pc).white().on_blue().to_string(),
@@ -1127,6 +1136,12 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
         }
         let subject = subject.unwrap();
         let characters = get_chars_for_subj(subject, image_cache, radical_width, web_config).await;
+        if let Err(_) = characters {
+            batch.pop();
+            continue 'subject;
+        }
+        let characters = characters.unwrap();
+
         let is_meaning = match subject {
             Subject::Radical(_) => true,
             Subject::Kanji(_) => {
@@ -1445,7 +1460,7 @@ async fn command_review(args: &Args) {
         let total_assignments = assignments.len() + if let Some(batch) = &first_batch { batch.len() } else { 0 };
         let mut first_batch = first_batch;
         let ideal_batch_size = 20;
-        let mut batch_size = min(ideal_batch_size, total_assignments);
+        let mut batch_size;
         let (audio_tx, mut rx) = mpsc::channel::<AudioMessage>(5);
         let audio_web_config = web_config.clone();
         let audio_task = tokio::spawn(async move {
@@ -2341,7 +2356,6 @@ async fn try_download_text<F>(url: &str, web_config: &WaniWebConfig, path: &Path
 where F: Fn(&str) -> String {
     let request = web_config.client
         .get(url);
-        //.bearer_auth(&web_config.auth);
 
     match request.send().await {
         Err(_) => {
@@ -3826,8 +3840,8 @@ where P: AsRef<Path>, {
     Ok(io::BufReader::new(file).lines())
 }
 
-async fn get_chars_for_subj(subject: &wanidata::Subject, image_cache: &PathBuf, radical_width: u32, web_config: &WaniWebConfig) -> Vec<String> {
-    match subject {
+async fn get_chars_for_subj(subject: &wanidata::Subject, image_cache: &PathBuf, radical_width: u32, web_config: &WaniWebConfig) -> Result<Vec<String>, WaniError> {
+    Ok(match subject {
         Subject::Radical(r) => { 
             let rad_chars;
             if let Some(c) = &r.data.characters { 
@@ -3857,8 +3871,7 @@ async fn get_chars_for_subj(subject: &wanidata::Subject, image_cache: &PathBuf, 
                         rad_chars = lines;
                     }
                     Err(e) => {
-                        rad_chars = vec!["Error creating radical image".to_owned()];
-                        println!("{}", e);
+                        return Err(e);
                     }
                 }
             };
@@ -3867,5 +3880,5 @@ async fn get_chars_for_subj(subject: &wanidata::Subject, image_cache: &PathBuf, 
         Subject::Kanji(k) => vec![k.data.characters.to_owned()],
         Subject::Vocab(v) => vec![v.data.characters.to_owned()],
         Subject::KanaVocab(kv) => vec![kv.data.characters.to_owned()],
-    }
+    })
 }
