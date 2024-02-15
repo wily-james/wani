@@ -1270,7 +1270,6 @@ async fn command_review(args: &Args) {
                 },
                 Some(b) => {
                     println!("Resuming saved batch of reviews");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
                     let mut batch = Vec::with_capacity(b.len());
                     let mut revs = HashMap::with_capacity(b.len());
                     for (assignment, review) in b {
