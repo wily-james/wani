@@ -14,7 +14,7 @@ clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0", features = [] }
 home = "0"
 thiserror = "1.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs", "sync"] }
 tokio-rusqlite = "0.5.0"
 console = "0.15.8"
 rand = "0.8.5"
@@ -23,7 +23,7 @@ rodio = { version = "0", features = ["symphonia-all", "default"] }
 wana_kana = "3"
 image2ascii = "0"
 resvg = { version = "0.38.0" }
-usvg= { version = "0" }
+usvg = { version = "0" }
 rgb = "0.8.37"
 glob = "0.3.1"
 ctrlc = "3.4.2"

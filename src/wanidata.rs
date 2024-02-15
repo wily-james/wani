@@ -1,3 +1,4 @@
+
 use serde::{Deserialize, Serialize};
 use chrono::{
     DateTime,
@@ -426,6 +427,16 @@ pub struct PronunciationAudio {
     pub metadata: PronunciationMetadata
 }
 
+impl Clone for PronunciationAudio {
+    fn clone(&self) -> Self {
+        PronunciationAudio {
+            url: self.url.clone(),
+            content_type: self.content_type.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PronunciationMetadata
 {
@@ -435,6 +446,19 @@ pub struct PronunciationMetadata
     pub voice_actor_id: i32,
     pub voice_actor_name: String,
     pub voice_description: String,
+}
+
+impl Clone for PronunciationMetadata {
+    fn clone(&self) -> Self {
+        PronunciationMetadata {
+            gender: self.gender.clone(),
+            source_id: self.source_id,
+            pronunciation: self.pronunciation.clone(),
+            voice_actor_id: self.voice_actor_id,
+            voice_actor_name: self.voice_actor_name.clone(),
+            voice_description: self.voice_description.clone(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]

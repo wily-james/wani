@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::io::Write;
 use std::ops::Deref;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use std::sync::{Arc, PoisonError}; use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
@@ -27,6 +28,7 @@ use rusqlite::{
 };
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use tokio::join;
 use tokio::task::JoinSet;
 use tokio_rusqlite::Connection as AsyncConnection;
@@ -157,6 +159,12 @@ impl Display for WaniError {
             },
         }
     }
+}
+
+struct AudioMessage {
+    send_time: std::time::Instant,
+    id: i32,
+    audios: Vec<wanidata::PronunciationAudio>, // TODO - we can trim the fat off this message
 }
 
 type RateLimitBox = Arc<Mutex<Option<RateLimit>>>;
@@ -345,8 +353,7 @@ fn play_audio(audio_path: &PathBuf) -> Result<(), WaniError> {
             match source {
                 Ok(s) => {
                     sink.append(s);
-                    sink.sleep_until_end(); // TODO - move this to another thread to avoid blocking
-                                            // related: https://github.com/RustAudio/rodio/issues/381
+                    sink.sleep_until_end();
                     return Ok(())
                 },
                 Err(e) => {
@@ -471,9 +478,22 @@ async fn command_review(args: &Args) {
         Ok(())
     }
 
-    async fn do_reviews(assignments: &mut Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, conn: &AsyncConnection, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
+    async fn do_reviews(assignments: &mut Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, conn: &AsyncConnection, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
         assignments.reverse();
         let batch_size = min(20, assignments.len());
+        let (audio_tx, mut rx) = mpsc::channel::<AudioMessage>(5);
+        let audio_web_config = web_config.clone();
+        let audio_task = tokio::spawn(async move {
+            let audio_cache = audio_cache;
+            let mut last_finish_time = std::time::Instant::now();
+            while let Some(msg) = rx.recv().await {
+                if msg.send_time < last_finish_time {
+                    continue;
+                }
+                let _ = play_audio_for_subj(msg.id, msg.audios, &audio_cache, &audio_web_config).await;
+                last_finish_time = std::time::Instant::now();
+            }
+        });
 
         let mut review_result = None;
         let total_assignments = assignments.len();
@@ -497,7 +517,7 @@ async fn command_review(args: &Args) {
                 reviews.insert(nr.assignment_id, nr);
             }
 
-            let res = do_reviews_inner(assignments, &subjects, audio_cache, web_config, p_config, image_cache, &mut reviews, &mut batch, total_assignments).await;
+            let res = do_reviews_inner(&subjects, web_config, p_config, image_cache, &mut reviews, &mut batch, total_assignments, &audio_tx).await;
             if let Err(e) = &res {
                 match &e {
                     WaniError::Io(err) => {
@@ -517,10 +537,11 @@ async fn command_review(args: &Args) {
             save_reviews(reviews, conn, web_config, rate_limit).await?;
         }
 
+        audio_task.await?;
         review_result.unwrap_or(Ok(()))
     }
 
-    async fn do_reviews_inner(assignments: &Vec<Assignment>, subjects: &HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>, total_reviews: usize) -> Result<(), WaniError> {
+    async fn do_reviews_inner(subjects: &HashMap<i32, Subject>, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>, total_reviews: usize, audio_tx: &Sender<AudioMessage>) -> Result<(), WaniError> {
         enum AnswerColor {
             Green,
             Red,
@@ -804,7 +825,19 @@ async fn command_review(args: &Args) {
                                         _ => false,
                                     };
                                     if can_play_audio {
-                                        let _ = play_audio_for_subj(subject, audio_cache, web_config).await;
+                                        let (id, audios) = match subject {
+                                            Subject::Radical(r) => (r.id, None),
+                                            Subject::Kanji(k) => (k.id, None),
+                                            Subject::Vocab(d) => (d.id, Some(d.data.pronunciation_audios.clone())),
+                                            Subject::KanaVocab(d) => (d.id, Some(d.data.pronunciation_audios.clone())),
+                                        };
+                                        if let Some(audios) = audios {
+                                            let _ = audio_tx.send(AudioMessage {
+                                                send_time: std::time::Instant::now(),
+                                                id,
+                                                audios,
+                                            }).await;
+                                        }
                                     }
                                 },
                                 _ => {},
@@ -1058,7 +1091,7 @@ async fn command_review(args: &Args) {
             let _ = ctrlc::set_handler(move || {
                 println!("received Ctrl+C!");
             });
-            let res = do_reviews(&mut assignments, subjects_by_id, &audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit).await;
+            let res = do_reviews(&mut assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit).await;
             match res {
                 Ok(_) => {},
                 Err(e) => {println!("{:?}", e)},
@@ -1267,7 +1300,7 @@ async fn get_radical_image(radical: &wanidata::Radical, image_cache: &PathBuf, t
     Err(WaniError::Generic("Failed to convert any images.".into()))
 }
 
-async fn play_audio_for_subj(subject: &Subject, audio_cache: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
+async fn play_audio_for_subj(id: i32, audios: Vec<PronunciationAudio>, audio_cache: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
     fn get_audio_path(audio: &PronunciationAudio, audio_cache: &PathBuf, id: i32, index: usize) -> Option<PathBuf> {
         let ext;
         const MPEG: &str = "audio/mpeg";
@@ -1296,17 +1329,6 @@ async fn play_audio_for_subj(subject: &Subject, audio_cache: &PathBuf, web_confi
         Some(audio_path)
     }
 
-    let (id, audios) = match subject {
-        Subject::Radical(r) => (r.id, None),
-        Subject::Kanji(k) => (k.id, None),
-        Subject::Vocab(d) => (d.id, Some(&d.data.pronunciation_audios)),
-        Subject::KanaVocab(d) => (d.id, Some(&d.data.pronunciation_audios)),
-    };
-    if let None = audios {
-        return Ok(());
-    }
-
-    let audios = audios.unwrap();
     let audio_paths = audios.iter()
         .enumerate()
         .map(|(i, a)| get_audio_path(a, audio_cache, id, i))
