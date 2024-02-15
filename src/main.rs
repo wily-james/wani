@@ -861,12 +861,21 @@ async fn command_review(args: &Args) {
                                         };
                                     }
                                 },
-                                'n' | 'N' => {
+                                'n' => {
                                     if !tuple.0 { // Don't show info if the user isn't finished
                                                   // guessing
                                         info_status = match info_status {
                                             InfoStatus::Hidden => InfoStatus::Open(0),
-                                            InfoStatus::Open(n) => InfoStatus::Open(n + 1),
+                                            InfoStatus::Open(n) => InfoStatus::Open(n.wrapping_add(1)),
+                                        };
+                                    }
+                                },
+                                'N' => {
+                                    if !tuple.0 { // Don't show info if the user isn't finished
+                                                  // guessing
+                                        info_status = match info_status {
+                                            InfoStatus::Hidden => InfoStatus::Open(0),
+                                            InfoStatus::Open(n) => InfoStatus::Open(n.wrapping_sub(1)),
                                         };
                                     }
                                 },
