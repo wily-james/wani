@@ -473,7 +473,7 @@ async fn command_review(args: &Args) {
 
     async fn do_reviews(assignments: &mut Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, conn: &AsyncConnection, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
         assignments.reverse();
-        let batch_size = min(1, assignments.len());
+        let batch_size = min(20, assignments.len());
 
         let mut review_result = None;
         let total_assignments = assignments.len();
