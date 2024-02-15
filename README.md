@@ -7,6 +7,9 @@
 - Familiar UI and keybindings, but even more keyboard-centric.
 - Minimizes network requests for a more lag-free experience.
 
+## DISCLAIMER
+This is an unofficial WaniKani client. Use at your own risk.
+
 ## INSTALL
 
 TODO
