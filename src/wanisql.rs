@@ -3,6 +3,85 @@ use rusqlite::Statement;
 
 use crate::{wanidata::{self, AuxMeaning, ContextSentence, PronunciationAudio, VocabReading}, WaniError};
 
+pub(crate) const CREATE_ASSIGNMENTS_TBL: &str = "create table if not exists assignments (
+            id integer primary key,
+            available_at text,
+            created_at text not null,
+            hidden integer not null,
+            srs_stage integer not null,
+            started_at text,
+            subject_id integer not null,
+            subject_type integer not null
+        )";
+
+pub(crate) const INSERT_ASSIGNMENT: &str = "replace into assignments
+                            (id,
+                             available_at,
+                             created_at,
+                             hidden,
+                             srs_stage,
+                             started_at,
+                             subject_id,
+                             subject_type)
+                            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+
+pub(crate) const SELECT_AVAILABLE_ASSIGNMENTS: &str = "select 
+                            id,
+                            available_at,
+                            created_at,
+                            hidden,
+                            srs_stage,
+                            started_at,
+                            subject_id,
+                            subject_type from assignments where available_at < date('now');";
+
+pub(crate) fn parse_assignment(r: &rusqlite::Row<'_>) -> Result<wanidata::Assignment, WaniError> {
+    return Ok(wanidata::Assignment {
+        id: r.get::<usize, i32>(0)?,
+        data: wanidata::AssignmentData { 
+            available_at: 
+                if let Some(t) = r.get::<usize, Option<String>>(1)? { 
+                    Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
+                } 
+                else { 
+                    None 
+                },
+            created_at: DateTime::parse_from_rfc3339(&r.get::<usize, String>(2)?)?.with_timezone(&Utc),
+            hidden: r.get::<usize, bool>(3)?,
+            srs_stage: r.get::<usize, i32>(4)?,
+            started_at: 
+                if let Some(t) = r.get::<usize, Option<String>>(5)? { 
+                    Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
+                } 
+                else { 
+                    None 
+                },
+            subject_id: r.get::<usize, i32>(6)?,
+            subject_type: wanidata::SubjectType::from(r.get::<usize, usize>(7)?),
+            burned_at: None,
+            passed_at: None,
+            resurrected_at: None,
+            unlocked_at: None,
+        }
+    });
+}
+
+pub(crate) fn store_assignment(r: wanidata::Assignment, stmt: &mut Statement<'_>) -> Result<usize, rusqlite::Error>
+{
+    let subj_type: usize = r.data.subject_type.into();
+    let p = rusqlite::params!(
+        format!("{}", r.id),
+        if let Some(available_at) = r.data.available_at { Some(available_at.to_rfc3339()) } else { None },
+        r.data.created_at.to_rfc3339(),
+        r.data.hidden,
+        r.data.srs_stage,
+        if let Some(started_at) = r.data.started_at { Some(started_at.to_rfc3339()) } else { None },
+        r.data.subject_id,
+        subj_type,
+        );
+    return stmt.execute(p);
+}
+
 pub(crate) const CREATE_RADICALS_TBL: &str = "create table if not exists radicals (
             id integer primary key,
             aux_meanings text not null,
@@ -83,7 +162,6 @@ pub(crate) fn parse_radical(r: &rusqlite::Row<'_>) -> Result<wanidata::Radical, 
             document_url: r.get::<usize, String>(3)?, 
             hidden_at: 
                 if let Some(t) = r.get::<usize, Option<String>>(4)? { 
-                    println!("Hidden at: {}", t);
                     Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
                 } 
                 else { 
@@ -201,7 +279,6 @@ pub(crate) fn parse_kanji(k: &rusqlite::Row<'_>) -> Result<wanidata::Kanji, Wani
             document_url: k.get::<usize, String>(3)?, 
             hidden_at: 
                 if let Some(t) = k.get::<usize, Option<String>>(4)? { 
-                    println!("Hidden at: {}", t);
                     Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
                 } 
                 else { 
@@ -320,7 +397,6 @@ pub(crate) fn parse_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::Vocab, Wani
             document_url: v.get::<usize, String>(3)?, 
             hidden_at: 
                 if let Some(t) = v.get::<usize, Option<String>>(4)? { 
-                    println!("Hidden at: {}", t);
                     Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
                 } 
                 else { 
@@ -426,7 +502,6 @@ pub(crate) fn parse_kana_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::KanaVo
             document_url: v.get::<usize, String>(3)?, 
             hidden_at: 
                 if let Some(t) = v.get::<usize, Option<String>>(4)? { 
-                    println!("Hidden at: {}", t);
                     Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
                 } 
                 else { 

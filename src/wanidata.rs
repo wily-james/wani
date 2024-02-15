@@ -20,10 +20,10 @@ pub enum WaniData
     Collection(Collection),
     #[serde(rename="report")]
     Report(Summary),
-    #[serde(rename="assignment")]
 
     // Resources:
-    Assignment,
+    #[serde(rename="assignment")]
+    Assignment(Assignment),
     #[serde(rename="kana_vocabulary")]
     KanaVocabulary(KanaVocab),
     #[serde(rename="kanji")]
@@ -37,7 +37,7 @@ pub enum WaniData
     #[serde(rename="review_statistic")]
     ReviewStatistic,
     #[serde(rename="review")]
-    Review,
+    Review(Review),
     #[serde(rename="spaced_repetition_system")]
     SpacedRepetitionSystem,
     #[serde(rename="study_material")]
@@ -49,6 +49,77 @@ pub enum WaniData
     #[serde(rename="voice_actor")]
     VoiceActor,
 }
+
+#[derive(Deserialize, Debug)]
+pub struct Assignment {
+    pub id: i32,
+    pub data: AssignmentData,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AssignmentData {
+    pub available_at: Option<DateTime<Utc>>,
+    pub burned_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub hidden: bool,
+    pub passed_at: Option<DateTime<Utc>>,
+    pub resurrected_at: Option<DateTime<Utc>>,
+    pub srs_stage: i32,
+    pub started_at: Option<DateTime<Utc>>,
+    pub subject_id: i32,
+    pub subject_type: SubjectType,
+    pub unlocked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Review {
+    pub id: i32,
+    pub assignment_id: i32,
+    pub created_at: DateTime<Utc>,
+    pub ending_srs_stage: u8,
+    pub incorrect_meaning_answers: u16,
+    pub incorrect_reading_answers: u16,
+    pub spaced_repetition_system_id: i32,
+    pub starting_srs_stage: u8,
+    pub subject_id: i32
+}
+
+#[derive(Deserialize, Debug)]
+pub enum SubjectType {
+    #[serde(rename="radical")]
+    Radical,
+    #[serde(rename="kanji")]
+    Kanji,
+    #[serde(rename="vocabulary")]
+    Vocab,
+    #[serde(rename="kana_vocabulary")]
+    KanaVocab
+}
+
+
+impl std::convert::Into<usize> for SubjectType {
+    fn into(self) -> usize {
+        match self {
+            SubjectType::Radical => 0,
+            SubjectType::Kanji => 1,
+            SubjectType::Vocab => 2,
+            SubjectType::KanaVocab => 3,
+        }
+    }
+}
+
+impl std::convert::From<usize> for SubjectType {
+    fn from(value: usize) -> Self {
+        match value {
+            0 => SubjectType::Radical,
+            1 => SubjectType::Kanji,
+            2 => SubjectType::Vocab,
+            3 => SubjectType::KanaVocab,
+            _ => panic!(),
+        }
+    }
+}
+
 
 #[derive(Deserialize, Debug)]
 pub struct Collection {
