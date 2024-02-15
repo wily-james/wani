@@ -63,11 +63,13 @@ Option explanations:
 auth: your_auth_token
 ```
 Specify your WaniKani personal API token. See https://www.wanikani.com/settings/personal_access_tokens
+  
 
 ```
 colorblind: true
 ``` 
 Enable some minimal accessibility features for red-green colorblindness.
+  
 
 ```
 datapath: /some/path
