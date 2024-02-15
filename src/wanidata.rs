@@ -382,6 +382,12 @@ pub enum AnswerResult {
 
     // This is an answer, but not an accepted answer
     MatchesNonAcceptedAnswer,
+
+    /// Entered kana when meaning was expected
+    KanaWhenMeaning,
+
+    // Input contains illegal characters
+    BadFormatting,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -399,7 +405,7 @@ pub enum AuxMeaningType
     Blacklist
 }
 
-pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool) -> AnswerResult {
+pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool, kana_input: &str) -> AnswerResult {
     match subject {
         Subject::KanaVocab(v) => is_meaning_correct(&v.data.meanings, &guess),
         Subject::Radical(r) => is_meaning_correct(&r.data.meanings, &guess),

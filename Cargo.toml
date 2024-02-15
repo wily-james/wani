@@ -19,4 +19,5 @@ tokio-rusqlite = "0.5.0"
 console = "0.15.8"
 rand = "0.8.5"
 itertools = "0.12.1"
-rodio = { version = "0.16.0", features = ["symphonia-all", "default"] }
+rodio = { version = "0", features = ["symphonia-all", "default"] }
+wana_kana = "3"

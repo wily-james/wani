@@ -1,11 +1,10 @@
 mod wanidata;
 mod wanisql;
 
-use crate::wanidata::{Assignment, NewReview, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
+use crate::wanidata::{Assignment, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::error::Error;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader};
 use std::ops::Deref;
 use std::sync::PoisonError;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
@@ -18,8 +17,7 @@ use rand::{thread_rng, Rng};
 use reqwest::{
     Response, Client, StatusCode
 };
-use rodio::decoder::LoopedDecoder;
-use rodio::{Decoder, OutputStream, Sink, Source};
+use rodio::{Decoder, OutputStream, Sink};
 use rusqlite::params;
 use rusqlite::{
     Connection, Error as SqlError
@@ -31,6 +29,7 @@ use tokio_rusqlite::Connection as AsyncConnection;
 use console:: {
     pad_str, style, Emoji, Term
 };
+use wana_kana::ConvertJapanese;
 
 #[derive(Parser)]
 struct Args {
@@ -268,7 +267,8 @@ fn command_query_radicals(args: &Args) {
     };
 }
 
-fn play_audio(audio_path: PathBuf) -> Result<(), WaniError> {
+// TODO - command to preload audios
+fn play_audio(audio_path: &PathBuf) -> Result<(), WaniError> {
     match OutputStream::try_default() {
         Ok(t) => {
             let file_res = File::open(&audio_path);
@@ -316,356 +316,315 @@ async fn command_review(args: &Args) {
     }
 
     async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
-            let term = Term::buffered_stdout();
-            let rng = &mut thread_rng();
-            let width = 80;
-            let text_width = 50;
-            let align = console::Alignment::Center;
-            let blue_tag = format!("\x1b[{}m", 4 + 40);
-            let red_tag = format!("\x1b[{}m", 1 + 40);
-            let magenta_tag = format!("\x1b[{}m", 5 + 40);
-            let cyan_tag = format!("\x1b[{}m", 6 + 40);
-            let green_tag = format!("\x1b[{}m", 2 + 40);
-            let wfmt_args;
-            if term.features().colors_supported() {
-                wfmt_args = wanidata::WaniFmtArgs {
-                    radical_args: wanidata::WaniTagArgs {
-                        open_tag: &blue_tag,
-                        close_tag: "\x1b[0m",
-                    },
-                    kanji_args: wanidata::WaniTagArgs {
-                        open_tag: &red_tag,
-                        close_tag: "\x1b[0m",
-                    },
-                    vocab_args: wanidata::WaniTagArgs {
-                        open_tag: &magenta_tag,
-                        close_tag: "\x1b[0m",
-                    },
-                    meaning_args: wanidata::WaniTagArgs {
-                        open_tag: &cyan_tag,
-                        close_tag: "\x1b[0m",
-                    },
-                    reading_args: wanidata::WaniTagArgs {
-                        open_tag: &cyan_tag,
-                        close_tag: "\x1b[0m",
-                    },
-                    ja_args: wanidata::WaniTagArgs {
-                        open_tag: &green_tag,
-                        close_tag: "\x1b[0m",
-                    },
-                };
+        let term = Term::buffered_stdout();
+        let rng = &mut thread_rng();
+        let width = 80;
+        let text_width = 50;
+        let align = console::Alignment::Center;
+        let blue_tag = format!("\x1b[{}m", 4 + 40);
+        let red_tag = format!("\x1b[{}m", 1 + 40);
+        let magenta_tag = format!("\x1b[{}m", 5 + 40);
+        let cyan_tag = format!("\x1b[{}m", 6 + 40);
+        let green_tag = format!("\x1b[{}m", 2 + 40);
+        let wfmt_args;
+        if term.features().colors_supported() {
+            wfmt_args = wanidata::WaniFmtArgs {
+                radical_args: wanidata::WaniTagArgs {
+                    open_tag: &blue_tag,
+                    close_tag: "\x1b[0m",
+                },
+                kanji_args: wanidata::WaniTagArgs {
+                    open_tag: &red_tag,
+                    close_tag: "\x1b[0m",
+                },
+                vocab_args: wanidata::WaniTagArgs {
+                    open_tag: &magenta_tag,
+                    close_tag: "\x1b[0m",
+                },
+                meaning_args: wanidata::WaniTagArgs {
+                    open_tag: &cyan_tag,
+                    close_tag: "\x1b[0m",
+                },
+                reading_args: wanidata::WaniTagArgs {
+                    open_tag: &cyan_tag,
+                    close_tag: "\x1b[0m",
+                },
+                ja_args: wanidata::WaniTagArgs {
+                    open_tag: &green_tag,
+                    close_tag: "\x1b[0m",
+                },
+            };
+        }
+        else {
+            wfmt_args = wanidata::EMPTY_ARGS;
+        }
+
+        assignments.reverse();
+        let total_reviews = assignments.len();
+        let mut done = 0;
+        let mut failed = 0;
+        let mut guesses = 0;
+        let batch_size = min(50, assignments.len());
+        let mut batch = Vec::with_capacity(batch_size);
+        for i in (assignments.len() - batch_size..assignments.len()).rev() {
+            batch.push(assignments.remove(i));
+        }
+
+        let mut reviews = HashMap::with_capacity(batch.len());
+        let now = Utc::now();
+        for nr in batch.iter().map(|a| wanidata::NewReview {
+            assignment_id: a.id,
+            created_at: now,
+            incorrect_meaning_answers: 0,
+            incorrect_reading_answers: 0,
+            status: wanidata::ReviewStatus::NotStarted,
+        }) {
+            reviews.insert(nr.assignment_id, nr);
+        }
+
+        let mut input = String::new();
+        while !batch.is_empty() {
+            batch.shuffle(rng);
+            let assignment = batch.last().unwrap();
+            let subj_id = assignment.data.subject_id;
+            let review = reviews.get_mut(&assignment.id).unwrap();
+            let subject = subjects.get(&assignment.data.subject_id);
+            if let None = subject {
+                term.write_line(&format!("Did not find subject with id: {}", assignment.data.subject_id))?;
+                break;
             }
-            else {
-                wfmt_args = wanidata::EMPTY_ARGS;
-            }
 
-            assignments.reverse();
-            let total_reviews = assignments.len();
-            let mut done = 0;
-            let mut failed = 0;
-            let mut guesses = 0;
-            let batch_size = min(50, assignments.len());
-            let mut batch = Vec::with_capacity(batch_size);
-            for i in (assignments.len() - batch_size..assignments.len()).rev() {
-                batch.push(assignments.remove(i));
-            }
+            let subject = subject.unwrap();
+            let characters = match subject {
+                Subject::Radical(r) => if let Some(c) = &r.data.characters { &c } else { "Radical with no text"},
+                Subject::Kanji(k) => &k.data.characters,
+                Subject::Vocab(v) => &v.data.characters,
+                Subject::KanaVocab(kv) => &kv.data.characters,
+            };
+            let is_meaning = match subject {
+                Subject::Radical(_) => true,
+                Subject::Kanji(_) => {
+                    match review.status {
+                        wanidata::ReviewStatus::NotStarted => rng.gen_bool(0.5),
+                        wanidata::ReviewStatus::MeaningDone => false,
+                        wanidata::ReviewStatus::ReadingDone => true,
+                        wanidata::ReviewStatus::Done => panic!(),
+                    }
+                },
+                Subject::Vocab(_) => {
+                    match review.status {
+                        wanidata::ReviewStatus::NotStarted => rng.gen_bool(0.5),
+                        wanidata::ReviewStatus::MeaningDone => false,
+                        wanidata::ReviewStatus::ReadingDone => true,
+                        wanidata::ReviewStatus::Done => panic!(),
+                    }
+                },
+                Subject::KanaVocab(_) => true,
+            };
+            let review_type_text = match subject {
+                Subject::Radical(_) => "Radical Name",
+                Subject::Kanji(_) => if is_meaning { "Kanji Meaning" } else { "Kanji Reading" },
+                Subject::Vocab(_) => if is_meaning { "Vocab Meaning" } else { "Vocab Reading" },
+                Subject::KanaVocab(_) => "Vocab Meaning",
+            };
 
-            let mut reviews = HashMap::with_capacity(batch.len());
-            let now = Utc::now();
-            for nr in batch.iter().map(|a| wanidata::NewReview {
-                            assignment_id: a.id,
-                            created_at: now,
-                            incorrect_meaning_answers: 0,
-                            incorrect_reading_answers: 0,
-                            status: wanidata::ReviewStatus::NotStarted,
-                        }) {
-                reviews.insert(nr.assignment_id, nr);
-            }
+            let padded_chars = pad_str(characters, width, align, None);
+            let char_line = match subject {
+                Subject::Radical(_) => style(padded_chars).white().on_blue().to_string(),
+                Subject::Kanji(_) => style(padded_chars).white().on_red().to_string(),
+                _ => style(padded_chars).white().on_magenta().to_string(),
+            };
 
-            while !batch.is_empty() {
-                batch.shuffle(rng);
-                let assignment = batch.last().unwrap();
-                let subj_id = assignment.data.subject_id;
-                let review = reviews.get_mut(&assignment.id).unwrap();
-                let subject = subjects.get(&assignment.data.subject_id);
-                if let None = subject {
-                    term.write_line(&format!("Did not find subject with id: {}", assignment.data.subject_id))?;
-                    break;
-                }
+            let mut toast = None;
+            print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, "")?;
+            term.move_cursor_to(width / 2, 3)?;
+            term.flush()?;
 
-                let subject = subject.unwrap();
-                let characters = match subject {
-                    Subject::Radical(r) => if let Some(c) = &r.data.characters { &c } else { "Radical with no text"},
-                    Subject::Kanji(k) => &k.data.characters,
-                    Subject::Vocab(v) => &v.data.characters,
-                    Subject::KanaVocab(kv) => &kv.data.characters,
-                };
-                let is_meaning = match subject {
-                    Subject::Radical(_) => true,
-                    Subject::Kanji(_) => {
-                        match review.status {
-                            wanidata::ReviewStatus::NotStarted => rng.gen_bool(0.5),
-                            wanidata::ReviewStatus::MeaningDone => false,
-                            wanidata::ReviewStatus::ReadingDone => true,
-                            wanidata::ReviewStatus::Done => panic!(),
-                        }
-                    },
-                    Subject::Vocab(_) => {
-                        match review.status {
-                            wanidata::ReviewStatus::NotStarted => rng.gen_bool(0.5),
-                            wanidata::ReviewStatus::MeaningDone => false,
-                            wanidata::ReviewStatus::ReadingDone => true,
-                            wanidata::ReviewStatus::Done => panic!(),
-                        }
-                    },
-                    Subject::KanaVocab(_) => true,
-                };
-                let review_type_text = match subject {
-                    Subject::Radical(_) => "Radical Name",
-                    Subject::Kanji(_) => if is_meaning { "Kanji Meaning" } else { "Kanji Reading" },
-                    Subject::Vocab(_) => if is_meaning { "Vocab Meaning" } else { "Vocab Reading" },
-                    Subject::KanaVocab(_) => "Vocab Meaning",
-                };
-
-                let padded_chars = pad_str(characters, width, align, None);
-                let char_line = match subject {
-                    Subject::Radical(_) => style(padded_chars).white().on_blue().to_string(),
-                    Subject::Kanji(_) => style(padded_chars).white().on_red().to_string(),
-                    _ => style(padded_chars).white().on_magenta().to_string(),
-                };
-
-                // Print status line
-                let mut toast = None;
-                print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, "")?;
-                term.move_cursor_to(width / 2, 3)?;
-                term.flush()?;
+            loop {
+                input.clear();
+                let mut vis_input = &input;
+                let mut kana_input = String::new();
 
                 loop {
-                    let mut input = String::new();
-                    loop {
-                        let char = term.read_key()?;
-                        match char {
-                            console::Key::Enter => {
-                                break;
-                            },
-                            console::Key::Backspace => {
-                                input.pop();
-                            },
-                            console::Key::Char(c) => {
-                                input.push(c);
-                            },
-                            _ => {},
-                        };
-
-                        let input_padded = pad_str(&input, width, align, None);
-                        print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_padded)?;
-                        term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
-                        term.flush()?;
-                    }
-
-                    if input.is_empty() {
-                        continue;
-                    }
-
-                    let guess = input.to_lowercase();
-
-                    let answer_result = wanidata::is_correct_answer(subject, &guess, is_meaning);
-
-                    // Tuple (retry, toast, correct)
-                    let tuple = match answer_result {
-                        wanidata::AnswerResult::FuzzyCorrect => todo!(),
-                        wanidata::AnswerResult::Correct => {
-                            review.status = match subject {
-                                Subject::Radical(_) | Subject::KanaVocab(_) => 
-                                {
-                                    done += 1;
-                                    if review.incorrect_meaning_answers > 0 || review.incorrect_reading_answers > 0 {
-                                        failed += 1;
-                                    }
-                                    batch.pop();
-                                    wanidata::ReviewStatus::Done
-                                },
-                                Subject::Kanji(_) | Subject::Vocab(_) => {
-                                    match review.status {
-                                        wanidata::ReviewStatus::NotStarted => {
-                                            if is_meaning { 
-                                                ReviewStatus::MeaningDone
-                                            }
-                                            else {
-                                                ReviewStatus::ReadingDone
-                                            }
-                                        },
-                                        _ => { 
-                                            done += 1;
-                                            if review.incorrect_meaning_answers > 0 || review.incorrect_reading_answers > 0 {
-                                                failed += 1;
-                                            }
-                                            batch.pop();
-                                            ReviewStatus::Done
-                                        }
-                                    }
-                                },
-                            };
-                            (false, None, true)
+                    let char = term.read_key()?;
+                    match char {
+                        console::Key::Enter => {
+                            break;
                         },
-                        wanidata::AnswerResult::Incorrect => {
-                            failed += 1;
-                            if is_meaning {
-                                review.incorrect_meaning_answers += 1;
-                            }
-                            else {
-                                review.incorrect_reading_answers += 1;
-                            }
-                            (false, Some("Incorrect"), false)
+                        console::Key::Backspace => {
+                            input.pop();
                         },
-                        wanidata::AnswerResult::MatchesNonAcceptedAnswer => (true, Some("Answer not accepted. Try again"), false),
+                        console::Key::Char(c) => {
+                            input.push(c);
+                        },
+                        _ => {},
                     };
-                    toast = tuple.1;
 
-                    if !tuple.0 {
-                        guesses += 1;
-                    }
-
-                    let input_line = pad_str(&input, width, align, None);
-                    let input_formatted;
-                    if tuple.2 {
-                        input_formatted = style(input_line.deref()).white().on_green().to_string();
-                    }
-                    else {
-                        input_formatted = style(input_line.deref()).white().on_red().to_string();
-                    }
-                    print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
-                    term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
+                    kana_input = input.to_kana();
+                    vis_input = if is_meaning { &input } else { &kana_input };
+                    let input_padded = pad_str(&vis_input, width, align, None);
+                    print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_padded)?;
+                    let input_width = console::measure_text_width(&vis_input);
+                    term.move_cursor_to(width / 2 + input_width / 2, 3)?;
                     term.flush()?;
+                }
 
-                    let mut showing_info = false;
-                    loop {
-                        match term.read_key()? {
-                            console::Key::Enter => { break; },
-                            console::Key::Char(c) => {
-                                match c {
-                                    'f' | 'F' => {
-                                        showing_info = !showing_info;
-                                    },
-                                    'j' | 'J' => {
-                                        let audio = match subject {
-                                            Subject::Radical(r) => (r.id, None),
-                                            Subject::Kanji(k) => (k.id, None),
-                                            Subject::Vocab(d) => (d.id, d.data.pronunciation_audios.iter().find_or_last(|a| a.content_type != "audio/mpeg")),
-                                            Subject::KanaVocab(d) => (d.id, d.data.pronunciation_audios.iter().find_or_last(|a| a.content_type != "audio/mpeg")),
-                                        };
+                if input.is_empty() {
+                    continue;
+                }
 
-                                        if let Some(a) = audio.1 {
-                                            let ext;
-                                            const MPEG: &str = "audio/mpeg";
-                                            const OGG: &str = "audio/ogg";
-                                            const WEBM: &str = "audio/webm";
-                                            if a.content_type == MPEG {
-                                                ext = Some(".mpeg");
-                                            }
-                                            else if a.content_type == OGG {
-                                                ext = Some(".ogg");
-                                            }
-                                            else if a.content_type == WEBM {
-                                                ext = Some(".webm");
-                                            }
-                                            else {
-                                                ext = None;
-                                            }
+                let guess = vis_input.to_lowercase();
+                let answer_result = wanidata::is_correct_answer(subject, &guess, is_meaning, &kana_input);
 
-                                            if let Some(ext) = ext {
-                                                let id = audio.0;
-                                                let mut audio_path = audio_cache.clone();
-                                                audio_path.push(format!("{}_0{}", id, ext));
-
-                                                if let Err(_) = File::open(&audio_path) {
-                                                    let request = web_config.client
-                                                        .get(&a.url);
-                                                    match request.send().await {
-                                                        Err(_) => {
-                                                            println!("Error fetching audio from url: {}", a.url);
-                                                        },
-                                                        Ok(request) => {
-                                                            if request.status() != reqwest::StatusCode::OK {
-                                                                println!("Error fetching audio. HTTP {}", request.status());
-                                                            }
-                                                            else {
-                                                                if let Ok(f) = tokio::fs::File::create(&audio_path).await {
-                                                                    let mut reader = tokio::io::BufWriter::new(f);
-                                                                    let res = reader.write_all_buf(&mut request.bytes().await?).await;
-                                                                    if let Err(e) = res {
-                                                                        println!("Error downloading audio. {}", e);
-                                                                        term.read_key()?;
-                                                                    }
-                                                                }
-                                                            }
-                                                        },
-                                                    }
-                                                }
-
-                                                let res = play_audio(audio_path);
-                                                if let Err(e) = res {
-                                                    println!("Error playing audio for id: {}. Error: {}", subj_id, e);
-                                                    term.read_key()?;
-                                                }
-                                            }
+                // Tuple (retry, toast, correct)
+                let tuple = match answer_result {
+                    wanidata::AnswerResult::FuzzyCorrect => todo!(),
+                    wanidata::AnswerResult::BadFormatting => todo!(),
+                    wanidata::AnswerResult::KanaWhenMeaning => todo!(),
+                    wanidata::AnswerResult::Correct => {
+                        review.status = match subject {
+                            Subject::Radical(_) | Subject::KanaVocab(_) => 
+                            {
+                                done += 1;
+                                if review.incorrect_meaning_answers > 0 || review.incorrect_reading_answers > 0 {
+                                    failed += 1;
+                                }
+                                batch.pop();
+                                wanidata::ReviewStatus::Done
+                            },
+                            Subject::Kanji(_) | Subject::Vocab(_) => {
+                                match review.status {
+                                    wanidata::ReviewStatus::NotStarted => {
+                                        if is_meaning { 
+                                            ReviewStatus::MeaningDone
+                                        }
+                                        else {
+                                            ReviewStatus::ReadingDone
                                         }
                                     },
-                                    _ => {},
+                                    _ => { 
+                                        done += 1;
+                                        if review.incorrect_meaning_answers > 0 || review.incorrect_reading_answers > 0 {
+                                            failed += 1;
+                                        }
+                                        batch.pop();
+                                        ReviewStatus::Done
+                                    }
                                 }
                             },
-                            _ => {
-                            },
+                        };
+                        (false, None, true)
+                    },
+                    wanidata::AnswerResult::Incorrect => {
+                        failed += 1;
+                        if is_meaning {
+                            review.incorrect_meaning_answers += 1;
                         }
+                        else {
+                            review.incorrect_reading_answers += 1;
+                        }
+                        (false, Some("Incorrect"), false)
+                    },
+                    wanidata::AnswerResult::MatchesNonAcceptedAnswer => (true, Some("Answer not accepted. Try again"), false),
+                };
+                toast = tuple.1;
 
-                        print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
-                        if showing_info {
-                            let lines = match subject {
-                                Subject::Radical(r) => {
-                                    let mnemonic = wanidata::format_wani_text(&r.data.meaning_mnemonic, &wfmt_args);
-                                    split_str_by_len(&mnemonic, text_width)
-                                },
-                                Subject::Kanji(k) => {
-                                    if is_meaning {
-                                        let mnemonic = wanidata::format_wani_text(&k.data.meaning_mnemonic, &wfmt_args);
-                                        split_str_by_len(&mnemonic, text_width)
+                if !tuple.0 {
+                    guesses += 1;
+                }
+
+                let input_line = pad_str(&vis_input, width, align, None);
+                let input_formatted;
+                if tuple.2 {
+                    input_formatted = style(input_line.deref()).white().on_green().to_string();
+                }
+                else {
+                    input_formatted = style(input_line.deref()).white().on_red().to_string();
+                }
+                print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
+                let input_width = console::measure_text_width(&vis_input);
+                term.move_cursor_to(width / 2 + input_width / 2, 3)?;
+                term.flush()?;
+
+                let mut showing_info = false;
+                loop {
+                    match term.read_key()? {
+                        console::Key::Enter => { break; },
+                        console::Key::Char(c) => {
+                            match c {
+                                'f' | 'F' => {
+                                    if !tuple.0 { // Don't show info if the user isn't finished
+                                                  // guessing
+                                        showing_info = !showing_info;
                                     }
-                                    else {
-                                        let mnemonic = wanidata::format_wani_text(&k.data.reading_mnemonic, &wfmt_args);
-                                        split_str_by_len(&mnemonic, text_width)
+                                },
+                                'j' | 'J' => {
+                                    let mut can_play_audio = !is_meaning && review.incorrect_reading_answers > 0;
+                                    can_play_audio = !tuple.0 && can_play_audio || match review.status {
+                                        ReviewStatus::Done | ReviewStatus::ReadingDone => {
+                                            true
+                                        },
+                                        _ => false,
+                                    };
+                                    if can_play_audio {
+                                        let _ = play_audio_for_subj(subject, audio_cache, web_config, &term).await;
                                     }
                                 },
-                                Subject::Vocab(v) => {
-                                    if is_meaning {
-                                        let mnemonic = wanidata::format_wani_text(&v.data.meaning_mnemonic, &wfmt_args);
-                                        split_str_by_len(&mnemonic, text_width)
-                                    }
-                                    else {
-                                        let mnemonic = wanidata::format_wani_text(&v.data.reading_mnemonic, &wfmt_args);
-                                        split_str_by_len(&mnemonic, text_width)
-                                    }
-                                },
-                                Subject::KanaVocab(kv) => {
-                                    let mnemonic = wanidata::format_wani_text(&kv.data.meaning_mnemonic, &wfmt_args);
-                                    split_str_by_len(&mnemonic, text_width)
-                                },
-                            };
-                            for line in &lines {
-                                term.write_line(&pad_str(line, width, align, None))?;
+                                _ => {},
                             }
+                        },
+                        _ => {
+                        },
+                    }
+
+                    print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
+                    if showing_info {
+                        let lines = match subject {
+                            Subject::Radical(r) => {
+                                let mnemonic = wanidata::format_wani_text(&r.data.meaning_mnemonic, &wfmt_args);
+                                split_str_by_len(&mnemonic, text_width)
+                            },
+                            Subject::Kanji(k) => {
+                                if is_meaning {
+                                    let mnemonic = wanidata::format_wani_text(&k.data.meaning_mnemonic, &wfmt_args);
+                                    split_str_by_len(&mnemonic, text_width)
+                                }
+                                else {
+                                    let mnemonic = wanidata::format_wani_text(&k.data.reading_mnemonic, &wfmt_args);
+                                    split_str_by_len(&mnemonic, text_width)
+                                }
+                            },
+                            Subject::Vocab(v) => {
+                                if is_meaning {
+                                    let mnemonic = wanidata::format_wani_text(&v.data.meaning_mnemonic, &wfmt_args);
+                                    split_str_by_len(&mnemonic, text_width)
+                                }
+                                else {
+                                    let mnemonic = wanidata::format_wani_text(&v.data.reading_mnemonic, &wfmt_args);
+                                    split_str_by_len(&mnemonic, text_width)
+                                }
+                            },
+                            Subject::KanaVocab(kv) => {
+                                let mnemonic = wanidata::format_wani_text(&kv.data.meaning_mnemonic, &wfmt_args);
+                                split_str_by_len(&mnemonic, text_width)
+                            },
+                        };
+                        for line in &lines {
+                            term.write_line(&pad_str(line, width, align, None))?;
                         }
-
-                        term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
-                        term.flush()?;
                     }
 
-                    if !tuple.0 {
-                        break;
-                    }
+                    term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
+                    term.flush()?;
+                }
+
+                if !tuple.0 {
+                    break;
                 }
             }
+        }
 
-            Ok(())
+        Ok(())
     }
 
     let p_config = get_program_config(args);
@@ -850,6 +809,74 @@ async fn command_review(args: &Args) {
             let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config).await;
         },
     };
+}
+
+async fn play_audio_for_subj(subject: &Subject, audio_cache: &PathBuf, web_config: &WaniWebConfig, term: &Term) -> Result<(), WaniError> {
+    let audio = match subject {
+        Subject::Radical(r) => (r.id, None),
+        Subject::Kanji(k) => (k.id, None),
+        Subject::Vocab(d) => (d.id, d.data.pronunciation_audios.iter().find_or_last(|a| a.content_type != "audio/mpeg")),
+        Subject::KanaVocab(d) => (d.id, d.data.pronunciation_audios.iter().find_or_last(|a| a.content_type != "audio/mpeg")),
+    };
+
+    if let Some(a) = audio.1 {
+        let ext;
+        const MPEG: &str = "audio/mpeg";
+        const OGG: &str = "audio/ogg";
+        const WEBM: &str = "audio/webm";
+        if a.content_type == MPEG {
+            ext = Some(".mpeg");
+        }
+        else if a.content_type == OGG {
+            ext = Some(".ogg");
+        }
+        else if a.content_type == WEBM {
+            ext = Some(".webm");
+        }
+        else {
+            ext = None;
+        }
+
+        if let Some(ext) = ext {
+            let id = audio.0;
+            let mut audio_path = audio_cache.clone();
+            audio_path.push(format!("{}_0{}", id, ext));
+
+            if let Err(_) = File::open(&audio_path) {
+                let request = web_config.client
+                    .get(&a.url);
+                match request.send().await {
+                    Err(_) => {
+                        println!("Error fetching audio from url: {}", a.url);
+                    },
+                    Ok(request) => {
+                        if request.status() != reqwest::StatusCode::OK {
+                            println!("Error fetching audio. HTTP {}", request.status());
+                        }
+                        else {
+                            if let Ok(f) = tokio::fs::File::create(&audio_path).await {
+                                let mut reader = tokio::io::BufWriter::new(f);
+                                let res = reader.write_all_buf(&mut request.bytes().await?).await;
+                                if let Err(e) = res {
+                                    println!("Error downloading audio. {}", e);
+                                    term.read_key()?;
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+
+            let res = play_audio(&audio_path);
+            if let Err(_) = res {
+                if let Err(_) = tokio::fs::remove_file(&audio_path).await {
+                    println!("Audio file did not download successfully, and failed to clean up the broken file. You should delete the file at: {}", audio_path.display());
+                    term.read_key()?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn split_str_by_len(s: &str, l: usize) -> Vec<String> {
