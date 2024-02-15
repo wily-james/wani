@@ -237,19 +237,6 @@ pub struct KanjiReading {
     pub r#type: KanjiType,
 }
 
-pub fn is_reading_correct(readings: &Vec<KanjiReading>, guess: &str) -> bool {
-    for reading in readings {
-        if !reading.accepted_answer {
-            continue;
-        }
-
-        if guess == reading.reading.to_lowercase() {
-            return true;
-        }
-    }
-    return false;
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 pub enum KanjiType
 {
@@ -326,15 +313,6 @@ pub struct VocabReading {
     pub reading: String,
 }
 
-pub fn is_vocab_reading_correct(readings: &Vec<VocabReading>, guess: &str) -> bool {
-    for reading in readings {
-        if reading.accepted_answer && reading.reading == guess {
-            return true;
-        }
-    }
-    return false;
-}
-
 #[derive(Deserialize, Debug)]
 pub struct KanaVocab {
     // Resource Common
@@ -395,17 +373,80 @@ pub struct Meaning {
     pub accepted_answer: bool,
 }
 
-pub fn is_meaning_correct(meanings: &Vec<Meaning>, guess: &str) -> bool {
-    for meaning in meanings {
-        if !meaning.accepted_answer {
-            continue;
-        }
+pub enum AnswerResult {
+    Correct,
+    Incorrect,
 
-        if guess == meaning.meaning.to_lowercase() {
-            return true;
+    // Correct, but needed to fuzzy-match to the correct answer
+    FuzzyCorrect,
+
+    // This is an answer, but not an accepted answer
+    MatchesNonAcceptedAnswer,
+}
+
+pub fn is_correct_answer(subject: Subject, guess: &str, is_meaning: bool) -> AnswerResult {
+    match subject {
+        Subject::KanaVocab(v) => is_meaning_correct(&v.data.meanings, &guess),
+        Subject::Radical(r) => is_meaning_correct(&r.data.meanings, &guess),
+        Subject::Kanji(k) => {
+            if is_meaning {
+                is_meaning_correct(&k.data.meanings, &guess)
+            }
+            else {
+                is_reading_correct(&k.data.readings, &guess)
+            }
+        },
+        Subject::Vocab(v) => {
+            if is_meaning {
+                is_meaning_correct(&v.data.meanings, &guess)
+            }
+            else {
+                is_vocab_reading_correct(&v.data.readings, &guess)
+            }
+        },
+    }
+}
+
+pub fn is_vocab_reading_correct(readings: &Vec<VocabReading>, guess: &str) -> AnswerResult {
+    for reading in readings {
+        if reading.reading.to_lowercase() == guess {
+            if reading.accepted_answer {
+                return AnswerResult::Correct;
+            }
+
+            return AnswerResult::MatchesNonAcceptedAnswer;
         }
     }
-    return false;
+
+    return AnswerResult::Incorrect;
+}
+
+pub fn is_reading_correct(readings: &Vec<KanjiReading>, guess: &str) -> AnswerResult {
+    for reading in readings {
+        if guess == reading.reading.to_lowercase() {
+            if reading.accepted_answer {
+                return AnswerResult::Correct;
+            }
+
+            return AnswerResult::MatchesNonAcceptedAnswer;
+        }
+    }
+
+    return AnswerResult::Incorrect;
+}
+
+pub fn is_meaning_correct(meanings: &Vec<Meaning>, guess: &str) -> AnswerResult {
+    for meaning in meanings {
+        if guess == meaning.meaning.to_lowercase() {
+            if meaning.accepted_answer {
+                return AnswerResult::Correct;
+            }
+
+            return AnswerResult::MatchesNonAcceptedAnswer;
+        }
+    }
+
+    return AnswerResult::Incorrect;
 }
 
 #[derive(Serialize, Deserialize, Debug)]
