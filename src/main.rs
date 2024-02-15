@@ -57,31 +57,33 @@ struct Args {
     auth: Option<String>,
 
     /// Specifies the directory in which to locate/create a cache of Wanikani data. Default is ~/.wani
+    /// The data path can also be specified in the wani config file with 
+    ///     datapath: /some/path
     #[arg(short, long, value_name = "PATH")]
     datapath: Option<PathBuf>,
 
-    /// Specifies the file path for wani configuration. Default is ~/.config/wani/.wani.conf
+    /// Specifies the containing file path for .wani.conf config file. Default is ~/.config/wani/
+    /// The config file path can also be specified in the WANI_CONFIG_PATH environment variable
     #[arg(short, long, value_name = "FILE")]
     configfile: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Lists a summary of the Lessons and Reviews that are currently available. This is the
-    /// default command
+    /// Lists a summary of the Lessons and Reviews that are available. This is the default command.
     Summary,
     /// a shorthand for the 'summary' command
     S,
-    /// Does first-time initialization
-    Init,
-    /// Syncs local data with WaniKani servers
-    Sync,
-    /// Forces update of local data instead of only fetching new data
-    ForceSync,
     /// Begin or resume a review session.
     Review,
     /// a shorthand for the 'review' command
     R,
+    /// Syncs local data with WaniKani servers
+    Sync,
+    /// Forces update of local data instead of only fetching new data
+    ForceSync,
+    /// Does first-time initialization
+    Init,
 
     // Debug/Testing commands:
     /// Check the cache info in db
