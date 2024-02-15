@@ -407,16 +407,7 @@ async fn command_review(args: &Args) {
                 break 'subject;
             }
             batch.shuffle(rng);
-            //let assignment = batch.last().unwrap();
-            let assignment = batch.iter().find_or_last(|s| {
-                let subject = subjects.get(&s.data.subject_id).unwrap();
-                if let wanidata::Subject::Radical(s) = subject {
-                    if let None = s.data.characters {
-                        return s.data.character_images.len() > 0;
-                    }
-                }
-                false
-            }).unwrap();
+            let assignment = batch.last().unwrap();
             let subj_id = assignment.data.subject_id;
             let review = reviews.get_mut(&assignment.id).unwrap();
             let subject = subjects.get(&assignment.data.subject_id);
@@ -892,7 +883,8 @@ async fn command_review(args: &Args) {
     };
 }
 
-async fn try_download_file(url: &str, web_config: &WaniWebConfig, path: &PathBuf) -> Result<(), WaniError> {
+async fn try_download_text<F>(url: &str, web_config: &WaniWebConfig, path: &PathBuf, modify_content: F) -> Result<(), WaniError> 
+where F: Fn(&str) -> String {
     let request = web_config.client
         .get(url)
         .bearer_auth(&web_config.auth);
@@ -907,12 +899,42 @@ async fn try_download_file(url: &str, web_config: &WaniWebConfig, path: &PathBuf
             }
             else {
                 if let Ok(mut f) = tokio::fs::File::create(&path).await {
-                    let body = request.text().await?;
-                    let body = body.replace("var(--color-text, #000)", "rgb(0,0,0)");
-                    //let body = body.replace("#000", "rgb(0,0,0)");
-                    println!("{}", body);
+                    let mut body = request.text().await?;
+                    body = modify_content(&body);
                     let _ = tokio::io::copy(&mut body.as_bytes(), &mut f).await?;
                     Ok(())
+                }
+                else {
+                    Err(WaniError::Generic("Error opening file to save downloaded content.".into()))
+                }
+            }
+        },
+    }
+}
+
+async fn try_download_file(url: &str, web_config: &WaniWebConfig, path: &PathBuf) -> Result<(), WaniError> {
+    let request = web_config.client
+        .get(url)
+        .bearer_auth(&web_config.auth);
+
+    match request.send().await {
+        Err(_) => {
+            Err(WaniError::Generic(format!("Error fetching file from url: {}", url)))
+        },
+        Ok(request) => {
+            if request.status() != reqwest::StatusCode::OK {
+                Err(WaniError::Generic(format!("Error fetching file. HTTP {}", request.status())))
+            }
+            else {
+                if let Ok(f) = tokio::fs::File::create(&path).await {
+                    let mut reader = tokio::io::BufWriter::new(f);
+                    let res = reader.write_all_buf(&mut request.bytes().await?).await;
+                    if let Err(e) = res {
+                        Err(WaniError::Generic(format!("Error downloading file. {}", e)))
+                    }
+                    else {
+                        Ok(())
+                    }
                 }
                 else {
                     Err(WaniError::Generic("Error opening file to save downloaded content.".into()))
@@ -1044,7 +1066,10 @@ async fn get_radical_image(radical: &wanidata::Radical, image_cache: &PathBuf, t
             None => continue,
         }
 
-        let res = try_download_file(&radical.data.character_images[i].url, web_config, &svg_paths[i]).await;
+        let f = |body: &str| {
+            body.replace("var(--color-text, #000)", "rgb(0,0,0)")
+        };
+        let res = try_download_text(&radical.data.character_images[i].url, web_config, &svg_paths[i], f).await;
         if let Ok(_) = res {
             let res = try_convert_image_png(&svg_paths[i], &png_paths[i]);
             if let Ok(_) = res {
