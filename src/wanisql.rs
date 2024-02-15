@@ -33,7 +33,7 @@ pub(crate) const SELECT_AVAILABLE_ASSIGNMENTS: &str = "select
                             srs_stage,
                             started_at,
                             subject_id,
-                            subject_type from assignments where available_at < date('now');";
+                            subject_type from assignments where available_at < datetime('now');";
 
 pub(crate) fn parse_assignment(r: &rusqlite::Row<'_>) -> Result<wanidata::Assignment, WaniError> {
     return Ok(wanidata::Assignment {

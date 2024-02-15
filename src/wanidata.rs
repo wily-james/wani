@@ -93,6 +93,23 @@ pub struct Review {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct NewReview {
+    pub assignment_id: i32,
+    pub created_at: DateTime<Utc>,
+    pub incorrect_meaning_answers: u16,
+    pub incorrect_reading_answers: u16,
+    pub status: ReviewStatus,
+}
+
+#[derive(Deserialize, Debug)]
+pub enum ReviewStatus {
+    NotStarted,
+    MeaningDone,
+    ReadingDone,
+    Done
+}
+
+#[derive(Deserialize, Debug)]
 pub enum SubjectType {
     #[serde(rename="radical")]
     Radical,

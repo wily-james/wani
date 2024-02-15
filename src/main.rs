@@ -1,13 +1,17 @@
 mod wanidata;
 mod wanisql;
 
-use crate::wanidata::{Assignment, Subject, SubjectType, WaniData, WaniResp};
+use crate::wanidata::{Assignment, NewReview, Subject, SubjectType, WaniData, WaniResp};
+use std::cmp::min;
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::PoisonError;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
 use chrono::Utc;
+use rand::seq::SliceRandom;
+use rand::{thread_rng, Rng};
 use reqwest::{
     Response, Client, StatusCode
 };
@@ -19,7 +23,7 @@ use thiserror::Error;
 use tokio::join;
 use tokio_rusqlite::Connection as AsyncConnection;
 use console:: {
-    Term, Emoji
+    pad_str, Emoji, Term
 };
 
 #[derive(Parser)]
@@ -254,31 +258,105 @@ fn command_query_radicals(args: &Args) {
 }
 
 async fn command_review(args: &Args) {
-    fn do_review(assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>) -> Result<(), WaniError> {
+    fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>) -> Result<(), WaniError> {
             let term = Term::buffered_stdout();
+            let rng = &mut thread_rng();
+            let width = 50;
+            let align = console::Alignment::Center;
 
-            term.read_key()?;
+            assignments.reverse();
+            let total_reviews = assignments.len();
+            let batch_size = min(50, assignments.len());
+            let mut batch = Vec::with_capacity(batch_size);
+            for i in (assignments.len() - batch_size..assignments.len()).rev() {
+                batch.push(assignments.remove(i));
+            }
 
-            for assignment in &assignments {
-                term.clear_screen()?;
-                term.write_line(&format!("{}: {}%, {}: {}, {}: {}", Emoji("\u{1F44D}", "Correct"), 100, Emoji("\u{2705}", "Done"), 0, Emoji("\u{1F4E9}", "Remaining"), assignments.len()))?;
+            let mut reviews = HashMap::with_capacity(batch.len());
+            let now = Utc::now();
+            for nr in batch.iter().map(|a| wanidata::NewReview {
+                            assignment_id: a.id,
+                            created_at: now,
+                            incorrect_meaning_answers: 0,
+                            incorrect_reading_answers: 0,
+                            status: wanidata::ReviewStatus::NotStarted,
+                        }) {
+                reviews.insert(nr.assignment_id, nr);
+            }
 
+            while !batch.is_empty() {
+                batch.shuffle(rng);
+                let assignment = batch.last().unwrap();
+                let review = reviews.get(&assignment.id).unwrap();
                 let subject = subjects.get(&assignment.data.subject_id);
-                if let Some(s) = subject {
-                    // Print subject display
-                    let display_text = match s {
-                        Subject::Radical(r) => if let Some(c) = &r.data.characters { &c } else { "Radical with no text"},
-                        Subject::Kanji(k) => &k.data.characters,
-                        Subject::Vocab(v) => &v.data.characters,
-                        Subject::KanaVocab(kv) => &kv.data.characters,
-                    };
-                    term.write_line(display_text)?;
-                }
-                else {
+                if let None = subject {
                     term.write_line(&format!("Did not find subject with id: {}", assignment.data.subject_id))?;
+                    break;
                 }
+
+                let subject = subject.unwrap();
+                let characters = match subject {
+                    Subject::Radical(r) => if let Some(c) = &r.data.characters { &c } else { "Radical with no text"},
+                    Subject::Kanji(k) => &k.data.characters,
+                    Subject::Vocab(v) => &v.data.characters,
+                    Subject::KanaVocab(kv) => &kv.data.characters,
+                };
+                let is_meaning = match subject {
+                    Subject::Radical(_) => true,
+                    Subject::Kanji(_) => {
+                        match review.status {
+                            wanidata::ReviewStatus::NotStarted => rng.gen_bool(0.5),
+                            wanidata::ReviewStatus::MeaningDone => false,
+                            wanidata::ReviewStatus::ReadingDone => true,
+                            wanidata::ReviewStatus::Done => panic!(),
+                        }
+                    },
+                    Subject::Vocab(_) => {
+                        match review.status {
+                            wanidata::ReviewStatus::NotStarted => rng.gen_bool(0.5),
+                            wanidata::ReviewStatus::MeaningDone => false,
+                            wanidata::ReviewStatus::ReadingDone => true,
+                            wanidata::ReviewStatus::Done => panic!(),
+                        }
+                    },
+                    Subject::KanaVocab(_) => true,
+                };
+                let review_type_text = match subject {
+                    Subject::Radical(_) => "Radical Name",
+                    Subject::Kanji(_) => if is_meaning { "Kanji Meaning" } else { "Kanji Reading" },
+                    Subject::Vocab(_) => if is_meaning { "Vocab Meaning" } else { "Vocab Reading" },
+                    Subject::KanaVocab(_) => "Vocab Meaning",
+                };
+
+                // Print status line
+                term.clear_screen()?;
+                term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", Emoji("\u{1F44D}", "Correct"), 100, Emoji("\u{2705}", "Done"), 0, Emoji("\u{1F4E9}", "Remaining"), total_reviews), width, align, None).deref())?;
+
+                term.write_line(pad_str(characters, width, align, None).deref())?;
+                term.write_line(pad_str(&format!("{}:", review_type_text), width, align, None).deref())?;
+                term.move_cursor_to(width / 2, 3)?;
                 term.flush()?;
-                term.read_key()?;
+
+                let mut input = String::new();
+                loop {
+                    let char = term.read_char()?;
+                    match char {
+                        '\u{000A}' => break,
+                        c => {
+                            input.push(c);
+
+                            // Print status line
+                            term.clear_screen()?;
+                            term.write_line(pad_str(&format!("{}: {}%, {}: {}, {}: {}", Emoji("\u{1F44D}", "Correct"), 100, Emoji("\u{2705}", "Done"), 0, Emoji("\u{1F4E9}", "Remaining"), total_reviews), width, align, None).deref())?;
+
+                            term.write_line(pad_str(characters, width, align, None).deref())?;
+                            term.write_line(pad_str(&format!("{}:", review_type_text), width, align, None).deref())?;
+                            term.write_line(pad_str(&input, width, align, None).deref())?;
+                            term.move_cursor_to(width / 2 + input.len() / 2, 3)?;
+                            term.flush()?;
+                        },
+                    };
+                }
             }
 
             Ok(())
@@ -377,7 +455,6 @@ async fn command_review(args: &Args) {
                 return;
             };
             let kanji = kanji.unwrap();
-            println!("Found kanji: {}", kanji.len());
             for s in kanji {
                 subjects_by_id.insert(s.id, wanidata::Subject::Kanji(s));
             }
@@ -411,7 +488,6 @@ async fn command_review(args: &Args) {
                 return;
             };
             let vocab = vocab.unwrap();
-            println!("Found vocab: {}", vocab.len());
             for s in vocab {
                 subjects_by_id.insert(s.id, wanidata::Subject::Vocab(s));
             }
@@ -449,9 +525,7 @@ async fn command_review(args: &Args) {
                 subjects_by_id.insert(s.id, wanidata::Subject::KanaVocab(s));
             }
 
-            println!("Found ids: {}", subjects_by_id.len());
-
-            let _ = do_review(assignments, subjects_by_id);
+            let _ = do_reviews(assignments, subjects_by_id);
         },
     };
 }
