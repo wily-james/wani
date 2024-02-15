@@ -1,7 +1,7 @@
 mod wanidata;
 
 use crate::wanidata::{
-    CacheInfoSchema, CacheInfoType, WaniData, WaniResp
+    AuxMeaning, CacheInfoSchema, CacheInfoType, WaniData, WaniResp
 };
 use std::{fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use clap::{Parser, Subcommand};
@@ -50,6 +50,7 @@ enum Command {
     ForceSync,
     /// Check the cache info in db
     CacheInfo,
+    QueryRadicals,
 }
 
 struct ProgramConfig {
@@ -74,6 +75,7 @@ fn main() {
                 Command::Sync => wani_sync(&args, false),
                 Command::ForceSync => wani_sync(&args, true),
                 Command::CacheInfo => check_cache_info(&args),
+                Command::QueryRadicals => wani_radicals(&args),
             }
         },
         None => wani_summary(&args),
@@ -120,6 +122,39 @@ fn setup_connection(args: &Args) -> Result<Connection, Error> {
     }
 }
 
+fn wani_radicals(args: &Args) {
+    let conn = setup_connection(&args);
+    match conn {
+        Err(e) => println!("{}", e.msg),
+        Ok(c) => {
+            let mut stmt = c.prepare("select 
+                                     id,
+                                      aux_meanings,
+                                      created_at,
+                                      document_url,
+                                      hidden_at,
+                                      lesson_position,
+                                      level,
+                                      meaning_mnemonic,
+                                      meanings,
+                                      slug,
+                                      srs_id,
+                                      amalgamation_subject_ids,
+                                      characters,
+                                      character_images from radicals;").unwrap();
+
+            match stmt.query_map([], |r| parse_radical(r))
+            {
+                Ok(radicals) => {
+                    for _ in radicals {
+                    }
+                },
+                Err(_) => {},
+            };
+        },
+    };
+}
+
 fn check_cache_info(args: &Args) {
     let conn = setup_connection(&args);
     match conn {
@@ -162,6 +197,27 @@ fn store_radical(r: wanidata::Radical, stmt: &mut Statement<'_>) -> Result<usize
         serde_json::to_string(&r.data.character_images).unwrap(),
         );
     return stmt.execute(p);
+}
+
+fn parse_radical(r: &rusqlite::Row<'_>) -> Result<wanidata::Radical, Error> {
+    println!("{}, {}", r.get::<usize, i32>(0).unwrap(), r.get::<usize, String>(1).unwrap());
+    return Ok(wanidata::Radical {
+        id: r.get::<usize, i32>(0)?,
+        data: wanidata::RadicalData { 
+            aux_meanings: serde_json::from_str::<Vec<AuxMeaning>>(&r.get::<usize, String>(1)?)?,
+            created_at: (), 
+            document_url: (), 
+            hidden_at: (), 
+            lesson_position: (), 
+            level: (), 
+            meaning_mnemonic: (), 
+            meanings: (), 
+            slug: (), 
+            spaced_repetition_system_id: (), 
+            amalgamation_subject_ids: (), 
+            characters: (), 
+            character_images: () }
+    });
 }
 
 fn wani_sync(args: &Args, ignore_cache: bool) {
