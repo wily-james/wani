@@ -386,7 +386,10 @@ async fn command_review(args: &Args) {
         }
 
         let mut input = String::new();
-        while !batch.is_empty() {
+        'subject: loop {
+            if batch.is_empty() {
+                break 'subject;
+            }
             batch.shuffle(rng);
             let assignment = batch.last().unwrap();
             let subj_id = assignment.data.subject_id;
@@ -394,9 +397,8 @@ async fn command_review(args: &Args) {
             let subject = subjects.get(&assignment.data.subject_id);
             if let None = subject {
                 term.write_line(&format!("Did not find subject with id: {}", assignment.data.subject_id))?;
-                break;
+                break 'subject;
             }
-
             let subject = subject.unwrap();
             let characters = match subject {
                 Subject::Radical(r) => if let Some(c) = &r.data.characters { &c } else { "Radical with no text"},
@@ -430,29 +432,27 @@ async fn command_review(args: &Args) {
                 Subject::Vocab(_) => if is_meaning { "Vocab Meaning" } else { "Vocab Reading" },
                 Subject::KanaVocab(_) => "Vocab Meaning",
             };
-
             let padded_chars = pad_str(characters, width, align, None);
             let char_line = match subject {
                 Subject::Radical(_) => style(padded_chars).white().on_blue().to_string(),
                 Subject::Kanji(_) => style(padded_chars).white().on_red().to_string(),
                 _ => style(padded_chars).white().on_magenta().to_string(),
             };
-
             let mut toast = None;
             print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, "")?;
             term.move_cursor_to(width / 2, 3)?;
             term.flush()?;
 
-            loop {
+            'input: loop {
                 input.clear();
                 let mut vis_input = &input;
                 let mut kana_input = String::new();
 
-                loop {
+                'line_of_input: loop {
                     let char = term.read_key()?;
                     match char {
                         console::Key::Enter => {
-                            break;
+                            break 'line_of_input;
                         },
                         console::Key::Backspace => {
                             input.pop();
@@ -473,7 +473,7 @@ async fn command_review(args: &Args) {
                 }
 
                 if input.is_empty() {
-                    continue;
+                    continue 'input;
                 }
 
                 let guess = vis_input.trim().to_lowercase();
@@ -550,9 +550,9 @@ async fn command_review(args: &Args) {
                 term.flush()?;
 
                 let mut showing_info = false;
-                loop {
+                'after_input: loop {
                     match term.read_key()? {
-                        console::Key::Enter => { break; },
+                        console::Key::Enter | console::Key::Backspace=> { break 'after_input; },
                         console::Key::Char(c) => {
                             match c {
                                 'f' | 'F' => {
@@ -576,8 +576,7 @@ async fn command_review(args: &Args) {
                                 _ => {},
                             }
                         },
-                        _ => {
-                        },
+                        _ => {},
                     }
 
                     print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
@@ -622,8 +621,14 @@ async fn command_review(args: &Args) {
                 }
 
                 if !tuple.0 {
-                    break;
+                    break 'input;
                 }
+
+                toast = None;
+                print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &"")?;
+                let input_width = 0;
+                term.move_cursor_to(width / 2 + input_width / 2, 3)?;
+                term.flush()?;
             }
         }
 
