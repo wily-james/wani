@@ -20,6 +20,8 @@ This is an unofficial WaniKani client. Use at your own risk.
   - [CONFIGURATION](#configuration)
 <!--toc:end-->
 
+[demo](https://raw.githubusercontent.com/wily-james/wani/main/demo.gif)
+
 ## INSTALL
 
 ### From Source
