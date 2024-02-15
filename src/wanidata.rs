@@ -568,6 +568,15 @@ pub struct AuxMeaning {
     pub meaning: String,
 }
 
+impl Answer for AuxMeaning {
+    fn answer<'a>(&'a self) -> (&'a str, bool) {
+        match self.r#type {
+            AuxMeaningType::Whitelist => (&self.meaning, true),
+            AuxMeaningType::Blacklist => (&self.meaning, false),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum AuxMeaningType
 {
@@ -579,42 +588,47 @@ pub enum AuxMeaningType
 
 pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool, kana_input: &str) -> AnswerResult {
     let is_meaning = is_meaning || match subject {
-        Subject::Radical(_) => true,
-        Subject::KanaVocab(_) => true,
         Subject::Kanji(_) => false,
         Subject::Vocab(_) => false,
+        
+        // No readings, so is_meaning should always be true
+        Subject::Radical(_) => true,
+        Subject::KanaVocab(_) => true,
     };
 
     if is_meaning {
         return match subject {
             Subject::Radical(r) => {
-                is_correct(&r.data.meanings, &Vec::<Meaning>::new(), guess, kana_input)
+                is_correct(&r.data.meanings, &Vec::<Meaning>::new(), &r.data.aux_meanings, guess, kana_input)
            },
             Subject::KanaVocab(kv) => {
-                is_correct(&kv.data.meanings, &Vec::<Meaning>::new(), guess, kana_input)
+                is_correct(&kv.data.meanings, &Vec::<Meaning>::new(), &kv.data.aux_meanings, guess, kana_input)
             },
             Subject::Kanji(k) => {
-                is_correct(&k.data.meanings, &k.data.readings, guess, kana_input)
+                is_correct(&k.data.meanings, &k.data.readings, &k.data.aux_meanings, guess, kana_input)
             },
             Subject::Vocab(v) => {
-                is_correct(&v.data.meanings, &v.data.readings, guess, kana_input)
+                is_correct(&v.data.meanings, &v.data.readings, &v.data.aux_meanings, guess, kana_input)
             },
         };
     }
 
+    let empty_vec = Vec::<Meaning>::new();
     return match subject {
         Subject::Radical(_) => panic!("No readings for radical. should be unreachable."),
         Subject::KanaVocab(_) => panic!("No readings for kana vocab. should be unreachable."),
-        Subject::Kanji(k) => is_correct(&k.data.readings, &Vec::<Meaning>::new(), guess, ""),
-        Subject::Vocab(v) => is_correct(&v.data.readings, &Vec::<Meaning>::new(), guess, ""),
+        Subject::Kanji(k) => is_correct(&k.data.readings, &empty_vec, &empty_vec, guess, ""),
+        Subject::Vocab(v) => is_correct(&v.data.readings, &empty_vec, &empty_vec, guess, ""),
     };
 }
 
-fn is_correct<T, U>(meanings: &Vec<T>, readings: &Vec<U>, guess: &str, kana_input: &str) -> AnswerResult
-where T: Answer, U: Answer {
+fn is_correct<T, U, V>(meanings: &Vec<T>, readings: &Vec<U>, aux_meanings: &Vec<V>, guess: &str, kana_input: &str) -> AnswerResult
+where T: Answer, U: Answer, V: Answer {
     let mut expect_numeric = false;
     let mut best = AnswerResult::Incorrect;
+    
     for m in meanings {
+        // Warning: this block is copy/pasted
         let (meaning, is_accepted_answer) = m.answer();
         if guess == meaning.trim().to_lowercase() {
             if is_accepted_answer {
@@ -624,12 +638,30 @@ where T: Answer, U: Answer {
             best = AnswerResult::MatchesNonAcceptedAnswer;
         }
 
-        if let AnswerResult::Correct = is_correct::<U, T>(readings, &vec![], kana_input, "") {
-            return AnswerResult::KanaWhenMeaning;
+        if is_accepted_answer && meaning.chars().any(|c| c.is_numeric()) {
+            expect_numeric = true;
+        }
+    }
+
+    for m in aux_meanings {
+        // Warning: this block is copy/pasted
+        let (meaning, is_accepted_answer) = m.answer();
+        if guess == meaning.trim().to_lowercase() {
+            if is_accepted_answer {
+                return AnswerResult::Correct;
+            }
+
+            best = AnswerResult::MatchesNonAcceptedAnswer;
         }
 
-        if meaning.chars().any(|c| c.is_numeric()) {
+        if is_accepted_answer && meaning.chars().any(|c| c.is_numeric()) {
             expect_numeric = true;
+        }
+    }
+
+    if meanings.len() > 0 {
+        if let AnswerResult::Correct = is_correct::<U, T, V>(readings, &vec![], &vec![], kana_input, "") {
+            return AnswerResult::KanaWhenMeaning;
         }
     }
 
@@ -708,9 +740,64 @@ pub fn format_wani_text(s: &str, args: &WaniFmtArgs) -> String {
 mod tests {
     use chrono::Utc;
     use crate::wanidata::AnswerResult;
-    use super::{format_wani_text, is_correct_answer, AuxMeaning, KanaVocab, KanaVocabData, Kanji, KanjiData, KanjiReading, Meaning, Radical, RadicalData, Subject, Vocab, VocabData, VocabReading, WaniFmtArgs, EMPTY_ARGS};
+    use super::{format_wani_text, is_correct_answer, AuxMeaning, AuxMeaningType, KanaVocab, KanaVocabData, Kanji, KanjiData, KanjiReading, Meaning, Radical, RadicalData, Subject, Vocab, VocabData, VocabReading, WaniFmtArgs, EMPTY_ARGS};
 
     // #region is_correct_answer Kanji
+
+    #[test]
+    fn is_correct_answer_kanji_on_whitelist() {
+        let is_meaning = true;
+        let kanji = get_aux_meaning_kanji();
+        let subj = Subject::Kanji(kanji);
+        let guess = "aux_whitelist";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_kanji_on_blacklist() {
+        let is_meaning = true;
+        let kanji = get_aux_meaning_kanji();
+        let subj = Subject::Kanji(kanji);
+        let guess = "aux_blacklist";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_kanji_matches_no_aux() {
+        let is_meaning = true;
+        let kanji = get_aux_meaning_kanji();
+        let subj = Subject::Kanji(kanji);
+        let guess = "auxnone";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    #[test]
+    fn is_correct_answer_kanji_matches_whitelist_but_is_reading_special_char() {
+        let is_meaning = false;
+        let kanji = get_aux_meaning_kanji();
+        let subj = Subject::Kanji(kanji);
+        let guess = "aux_whitelist";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::BadFormatting));
+    }
+
+    #[test]
+    fn is_correct_answer_kanji_matches_whitelist_but_is_reading() {
+        let is_meaning = false;
+        let kanji = get_aux_meaning_kanji();
+        let subj = Subject::Kanji(kanji);
+        let guess = "whitelist";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
 
     #[test]
     fn is_correct_answer_illegal_chars() {
@@ -1038,6 +1125,33 @@ mod tests {
         assert!(matches!(result, AnswerResult::Incorrect));
     }
 
+    #[test]
+    fn is_correct_answer_aux_meaning_blacklist() {
+        let is_meaning = true;
+        let radical = get_radical_aux_meanings();
+        let result = is_correct_answer(&Subject::Radical(radical), "aux_blacklist", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::MatchesNonAcceptedAnswer));
+    }
+
+    #[test]
+    fn is_correct_answer_aux_meaning_whitelist() {
+        let is_meaning = true;
+        let radical = get_radical_aux_meanings();
+        let result = is_correct_answer(&Subject::Radical(radical), "aux_whitelist", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Correct));
+    }
+
+    #[test]
+    fn is_correct_answer_aux_meaning_guess_matches_none() {
+        let is_meaning = true;
+        let radical = get_radical_aux_meanings();
+        let result = is_correct_answer(&Subject::Radical(radical), "auxnone", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
     // #endregion is_correct_answer Radical
 
     fn get_kanji(meanings: Vec<Meaning>, readings: Vec<KanjiReading>, aux_meanings: Vec<AuxMeaning>) -> Kanji {
@@ -1081,6 +1195,34 @@ mod tests {
         ];
 
         get_radical(meanings, vec![])
+    }
+
+    fn get_radical_aux_meanings() -> Radical {
+        let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+
+        let aux_meanings = vec![
+            AuxMeaning { 
+                r#type: AuxMeaningType::Blacklist, 
+                meaning: "aux_blacklist".into(), 
+            },
+            AuxMeaning { 
+                r#type: AuxMeaningType::Whitelist, 
+                meaning: "aux_whitelist".into(), 
+            },
+        ];
+
+        get_radical(meanings, aux_meanings)
     }
 
     fn get_radical(meanings: Vec<Meaning>, aux_meanings: Vec<AuxMeaning>) -> Radical {
@@ -1193,6 +1335,50 @@ mod tests {
                 reading_mnemonic: "".into(),
             }
         }
+    }
+
+    fn get_aux_meaning_kanji() -> Kanji {
+        let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+        let aux_meanings = vec![
+            AuxMeaning { 
+                r#type: AuxMeaningType::Blacklist, 
+                meaning: "aux_blacklist".into(), 
+            },
+            AuxMeaning { 
+                r#type: AuxMeaningType::Whitelist, 
+                meaning: "aux_whitelist".into(), 
+            },
+            AuxMeaning { 
+                r#type: AuxMeaningType::Whitelist, 
+                meaning: "whitelist".into(), 
+            },
+        ];
+        let kanji_readings = vec![
+            KanjiReading { 
+                reading: "not_はがねの".into(), 
+                primary: true, 
+                accepted_answer: false, 
+                r#type: super::KanjiType::Nanori 
+            },
+            KanjiReading { 
+                reading: "はがねの".into(), 
+                primary: true, 
+                accepted_answer: true, 
+                r#type: super::KanjiType::Nanori 
+            },
+        ];
+        get_kanji(meanings, kanji_readings, aux_meanings)
     }
 
     fn get_standard_kanji() -> Kanji {
