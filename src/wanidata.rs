@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use chrono::{
     DateTime,
     Utc,
@@ -81,8 +81,15 @@ pub struct RadicalData {
     // Radical Specific
     pub amalgamation_subject_ids: Vec<i32>,
     pub characters: Option<String>,
-    //character_images
+    pub character_images: Vec<RadicalImage>,
 }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RadicalImage
+{
+    pub url: String
+}
+
 
 #[derive(Deserialize, Debug)]
 pub struct Kanji {
@@ -90,6 +97,32 @@ pub struct Kanji {
     pub id: i32,
 
     pub data: KanjiData,
+}
+
+impl Kanji {
+    pub fn to_sql_str(r: Kanji) -> Result<String, Box<dyn std::error::Error>> {
+        return Ok(format!("({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        serde_json::to_string(&r.data.aux_meanings)?,
+        r.id,
+        r.data.created_at.to_rfc3339(),
+        r.data.document_url,
+        if let Some(hidden_at) = r.data.hidden_at { hidden_at.to_rfc3339() } else { "null".into() },
+        r.data.lesson_position,
+        r.data.level,
+        r.data.meaning_mnemonic,
+        serde_json::to_string(&r.data.meanings)?,
+        r.data.slug,
+        r.data.spaced_repetition_system_id,
+        serde_json::to_string(&r.data.amalgamation_subject_ids)?,
+        r.data.characters,
+        serde_json::to_string(&r.data.component_subject_ids)?,
+        r.data.meaning_hint.unwrap_or("null".into()),
+        r.data.reading_hint.unwrap_or("null".into()),
+        r.data.reading_mnemonic,
+        serde_json::to_string(&r.data.readings)?,
+        serde_json::to_string(&r.data.visually_similar_subject_ids)?
+        ));
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -118,7 +151,7 @@ pub struct KanjiData {
     pub visually_similar_subject_ids: Vec<i32>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct KanjiReading {
     pub reading: String,
     pub primary: bool,
@@ -126,7 +159,7 @@ pub struct KanjiReading {
     pub r#type: KanjiType,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum KanjiType
 {
     #[serde(rename="kunyomi")]
@@ -144,6 +177,31 @@ pub struct Vocab
     pub id: i32,
 
     pub data: VocabData
+}
+
+impl Vocab {
+    pub fn to_sql_str(r: &Vocab) -> Result<String, Box<dyn std::error::Error>> {
+        return Ok(format!("({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        serde_json::to_string(&r.data.aux_meanings)?,
+        r.id,
+        r.data.created_at.to_rfc3339(),
+        r.data.document_url,
+        if let Some(hidden_at) = r.data.hidden_at { hidden_at.to_rfc3339() } else { "null".into() },
+        r.data.lesson_position,
+        r.data.level,
+        r.data.meaning_mnemonic,
+        serde_json::to_string(&r.data.meanings)?,
+        r.data.slug,
+        r.data.spaced_repetition_system_id,
+        r.data.characters,
+        serde_json::to_string(&r.data.component_subject_ids)?,
+        serde_json::to_string(&r.data.context_sentences)?,
+        serde_json::to_string(&r.data.parts_of_speech)?,
+        serde_json::to_string(&r.data.pronunciation_audios)?,
+        serde_json::to_string(&r.data.readings)?,
+        r.data.reading_mnemonic
+        ));
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -171,20 +229,20 @@ pub struct VocabData
     pub reading_mnemonic: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ContextSentence {
     pub en: String,
     pub ja: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct PronunciationAudio {
     pub url: String,
     pub content_type: String,
     pub metadata: PronunciationMetadata
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct PronunciationMetadata
 {
     pub gender: String,
@@ -195,7 +253,7 @@ pub struct PronunciationMetadata
     pub voice_description: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct VocabReading {
     pub accepted_answer: bool,
     pub primary: bool,
@@ -208,6 +266,28 @@ pub struct KanaVocab {
     pub id: i32,
 
     pub data: KanaVocabData
+}
+
+impl KanaVocab {
+    pub fn to_sql_str(r: &KanaVocab) -> Result<String, Box<dyn std::error::Error>> {
+        return Ok(format!("({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        serde_json::to_string(&r.data.aux_meanings)?,
+        r.id,
+        r.data.created_at.to_rfc3339(),
+        r.data.document_url,
+        if let Some(hidden_at) = r.data.hidden_at { hidden_at.to_rfc3339() } else { "null".into() },
+        r.data.lesson_position,
+        r.data.level,
+        r.data.meaning_mnemonic,
+        serde_json::to_string(&r.data.meanings)?,
+        r.data.slug,
+        r.data.spaced_repetition_system_id,
+        r.data.characters,
+        serde_json::to_string(&r.data.context_sentences)?,
+        serde_json::to_string(&r.data.parts_of_speech)?,
+        serde_json::to_string(&r.data.pronunciation_audios)?
+        ));
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -255,20 +335,20 @@ pub struct Lesson {
     pub subject_ids: Vec<i32>
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Meaning {
     pub meaning: String,
     pub primary: bool,
     pub accepted_answer: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct AuxMeaning {
     pub r#type: AuxMeaningType,
     pub meaning: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum AuxMeaningType
 {
     #[serde(rename="whitelist")]

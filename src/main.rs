@@ -11,8 +11,7 @@ use reqwest::{
     //Error,
 };
 use rusqlite::{
-    Connection,
-    Error as SqlError,
+    Connection, Error as SqlError, Statement
 };
 
 #[derive(Parser)]
@@ -144,6 +143,27 @@ fn check_cache_info(args: &Args) {
     };
 }
 
+fn store_radical(r: wanidata::Radical, stmt: &mut Statement<'_>) -> Result<usize, SqlError>
+{
+    let p = rusqlite::params!(
+        format!("{}", r.id),
+        serde_json::to_string(&r.data.aux_meanings).unwrap(),
+        r.data.created_at.to_rfc3339(),
+        r.data.document_url,
+        if let Some(hidden_at) = r.data.hidden_at { hidden_at.to_rfc3339() } else { "null".into() },
+        format!("{}", r.data.lesson_position),
+        format!("{}", r.data.level),
+        r.data.meaning_mnemonic,
+        serde_json::to_string(&r.data.meanings).unwrap(),
+        r.data.slug,
+        format!("{}", r.data.spaced_repetition_system_id),
+        serde_json::to_string(&r.data.amalgamation_subject_ids).unwrap(),
+        if let Some(chars) = r.data.characters { chars } else { "null".into() },
+        serde_json::to_string(&r.data.character_images).unwrap(),
+        );
+    return stmt.execute(p);
+}
+
 fn wani_sync(args: &Args, ignore_cache: bool) {
     fn sync(args: &Args, conn: &Connection, ignore_cache: bool) {
         let web_config = get_web_config(&args);
@@ -197,6 +217,78 @@ fn wani_sync(args: &Args, ignore_cache: bool) {
 
                 match wr.data {
                     WaniData::Collection(c) => {
+                        let mut parse_fails = 0;
+                        let mut radicals: Vec<wanidata::Radical> = vec![];
+                        let mut kanji: Vec<String> = vec![];
+                        let mut vocab: Vec<String> = vec![];
+                        let mut kana_vocab: Vec<String> = vec![];
+                        for wd in c.data {
+                            match wd {
+                                WaniData::Radical(r) => {
+                                    radicals.push(r);
+                                }, 
+                                WaniData::Kanji(k) => {
+                                    if let Ok(s) = wanidata::Kanji::to_sql_str(k) {
+                                        kanji.push(s);
+                                    }
+                                    else {
+                                        parse_fails += 1;
+                                    }
+                                },
+                                WaniData::Vocabulary(v) => {
+                                    if let Ok(s) = wanidata::Vocab::to_sql_str(&v) {
+                                        vocab.push(s);
+                                    }
+                                    else {
+                                        parse_fails += 1;
+                                    }
+                                },
+                                WaniData::KanaVocabulary(kv) => {
+                                    if let Ok(s) = wanidata::KanaVocab::to_sql_str(&kv) {
+                                        kana_vocab.push(s);
+                                    }
+                                    else {
+                                        parse_fails += 1;
+                                    }
+                                },
+                                _ => {},
+                            }
+                        }
+
+                        let radicals_str = "replace into radicals
+                            (id,
+                             aux_meanings,
+                             created_at,
+                             document_url,
+                             hidden_at,
+                             lesson_position,
+                             level,
+                             meaning_mnemonic,
+                             meanings,
+                             slug,
+                             srs_id,
+                             amalgamation_subject_ids,
+                             characters,
+                             character_images)
+                            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
+
+                        let mut stmt = conn.prepare(radicals_str).unwrap();
+                        let rad_len = radicals.len();
+                        for r in radicals {
+                            match store_radical(r, &mut stmt) {
+                                Err(_) => {
+                                    println!("Error inserting into radicals.\n{}", radicals_str);
+                                    parse_fails += 1;
+                                }
+                                Ok(_) => {},
+                            }
+                        }
+
+                        println!("Updated Resources: {}", rad_len + kanji.len() + vocab.len() + kana_vocab.len());
+                        if parse_fails > 0 {
+                            println!("Parse Failures: {}", parse_fails);
+                        }
+
                         if let Some(tag) = headers.get(reqwest::header::ETAG)
                         {
                             if let Ok(t) = tag.to_str() {
@@ -205,21 +297,6 @@ fn wani_sync(args: &Args, ignore_cache: bool) {
                                     .unwrap();
                             }
                         }
-
-                        for wd in &c.data {
-                            match wd {
-                                WaniData::Radical(r) => {
-                                },
-                                WaniData::Kanji(k) => {
-                                },
-                                WaniData::Vocabulary(v) => {
-                                },
-                                WaniData::KanaVocabulary(kv) => {
-                                },
-                                _ => {},
-                            }
-                        }
-                        println!("Updated Resources: {}", c.data.len());
                     },
                     _ => {
                         println!("Unexpected data returned while updating resources cache: {:?}", wr.data)
@@ -269,13 +346,12 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
             updated_after text
         )", [])?;
 
-    c.execute("insert into cache_info (id) values (0)", [])?;
+    c.execute("replace into cache_info (id) values (0)", [])?;
 
     // Radicals
     c.execute(
         "create table if not exists radicals (
             id integer primary key,
-            data_updated_at text not null,
             aux_meanings text not null,
             created_at text not null, 
             document_url text not null,
@@ -287,14 +363,14 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
             slug text not null,
             srs_id integer not null,
             amalgamation_subject_ids text not null,
-            characters text
+            characters text,
+            character_images text not null
         )", [])?;
     
     // Kanji
     c.execute(
         "create table if not exists kanji (
             id integer primary key,
-            data_updated_at text not null,
             aux_meanings text not null,
             created_at text not null, 
             document_url text not null,
@@ -319,7 +395,6 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
     c.execute(
         "create table if not exists vocab (
             id integer primary key,
-            data_updated_at text not null,
             aux_meanings text not null,
             created_at text not null, 
             document_url text not null,
@@ -334,7 +409,7 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
             component_subject_ids text not null,
             context_sentences text not null,
             parts_of_speech text not null,
-            pronunciation_audio_ids text not null,
+            pronunciation_audios text not null,
             readings text not null,
             reading_mnemonic text not null
         )", [])?;
@@ -343,7 +418,6 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
     c.execute(
         "create table if not exists kana_vocab (
             id integer primary key,
-            data_updated_at text not null,
             aux_meanings text not null,
             created_at text not null, 
             document_url text not null,
@@ -357,7 +431,7 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
             characters text not null,
             context_sentences text not null,
             parts_of_speech text not null,
-            pronunciation_audio_ids text not null
+            pronunciation_audios text not null
         )", [])?;
 
     match c.close() {
