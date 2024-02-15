@@ -4,10 +4,10 @@ mod wanisql;
 use crate::wanidata::{Assignment, NewReview, PronunciationAudio, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::error::Error;
 use std::io::BufReader;
 use std::io::Write;
 use std::ops::Deref;
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
@@ -98,7 +98,7 @@ enum Command {
 /// Info saved to program config file
 struct ProgramConfig {
     auth: Option<String>,
-    //configpath: PathBuf,
+    data_path: PathBuf,
     colorblind: bool,
 }
 
@@ -224,7 +224,14 @@ async fn main() -> Result<(), WaniError> {
 }
 
 fn command_clear_reviews(args: &Args) {
-    let conn = setup_connection(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -234,7 +241,14 @@ fn command_clear_reviews(args: &Args) {
 }
 
 fn command_query_reviews(args: &Args) {
-    let conn = setup_connection(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -253,7 +267,14 @@ fn command_query_reviews(args: &Args) {
 }
 
 fn command_query_assignments(args: &Args) {
-    let conn = setup_connection(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -273,7 +294,14 @@ fn command_query_assignments(args: &Args) {
 }
 
 fn command_query_kana_vocab(args: &Args) {
-    let conn = setup_connection(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -292,7 +320,14 @@ fn command_query_kana_vocab(args: &Args) {
 }
 
 fn command_query_vocab(args: &Args) {
-    let conn = setup_connection(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -313,7 +348,14 @@ fn command_query_vocab(args: &Args) {
 }
 
 fn command_query_kanji(args: &Args) {
-    let conn = setup_connection(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -333,7 +375,14 @@ fn command_query_kanji(args: &Args) {
 }
 
 fn command_query_radicals(args: &Args) {
-    let conn = setup_connection(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -986,13 +1035,15 @@ async fn command_review(args: &Args) {
         println!("{}", e);
     }
     let p_config = p_config.unwrap();
+
     let web_config = get_web_config(&p_config);
     if let Err(e) = web_config {
         println!("{}", e);
         return;
     }
     let web_config = web_config.unwrap();
-    let conn = setup_async_connection(args).await;
+
+    let conn = setup_async_connection(&p_config).await;
     let rate_limit = Arc::new(Mutex::new(None));
     match conn {
         Err(e) => println!("{}", e),
@@ -1202,13 +1253,13 @@ async fn command_review(args: &Args) {
                 subjects_by_id.insert(s.id, wanidata::Subject::KanaVocab(s));
             }
 
-            let audio_cache = get_audio_path(&args);
+            let audio_cache = get_audio_path(&p_config);
             if let Err(e) = audio_cache {
                 println!("{}", e);
                 return;
             }
 
-            let image_cache = get_image_cache(&args);
+            let image_cache = get_image_cache(&p_config);
             if let Err(e) = image_cache {
                 println!("{}", e);
                 return;
@@ -1962,7 +2013,14 @@ where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_
 }
 
 fn command_cache_info(args: &Args) {
-    let conn = setup_connection(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -2029,7 +2087,7 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
     }
     let web_config = web_config.unwrap();
 
-    let conn = setup_async_connection(&args).await;
+    let conn = setup_async_connection(&p_config).await;
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -2295,7 +2353,14 @@ async fn update_cache(last_modified: Option<&str>, cache_type: usize, last_reque
 }
 
 fn command_init(args: &Args) {
-    let conn = setup_connection(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
@@ -2666,8 +2731,8 @@ fn test_handle_wani_resp(w: WaniResp) -> () {
     }
 }
 
-fn get_image_cache(args: &Args) -> Result<PathBuf, WaniError> {
-    let mut db_path = get_db_path(args)?;
+fn get_image_cache(p_config: &ProgramConfig) -> Result<PathBuf, WaniError> {
+    let mut db_path = get_db_path(p_config)?;
     db_path.pop();
     db_path.push("images");
     
@@ -2681,8 +2746,8 @@ fn get_image_cache(args: &Args) -> Result<PathBuf, WaniError> {
     return Ok(db_path);
 }
 
-fn get_audio_path(args: &Args) -> Result<PathBuf, WaniError> {
-    let mut db_path = get_db_path(args)?;
+fn get_audio_path(p_config: &ProgramConfig) -> Result<PathBuf, WaniError> {
+    let mut db_path = get_db_path(p_config)?;
     db_path.pop();
     db_path.push("audio");
     
@@ -2696,41 +2761,25 @@ fn get_audio_path(args: &Args) -> Result<PathBuf, WaniError> {
     return Ok(db_path);
 }
 
-fn get_db_path(args: &Args) -> Result<PathBuf, WaniError> {
-    let mut datapath = PathBuf::new();
-    if let Some(dpath) = &args.datapath {
-        datapath.push(dpath);
-    }
-    else {
-        match home::home_dir() {
-            Some(h) => {
-                datapath.push(h);
-                datapath.push(".wani");
-            },
-            None => {
-                return Err(WaniError::Generic("Could not find home directory. Please manually specify datapath arg. Use \"wani -help\" for more details.".into()));
-            }
-        }
-    }
-    
-    if !Path::exists(&datapath)
+fn get_db_path(p_config: &ProgramConfig) -> Result<PathBuf, WaniError> {
+    if !Path::exists(&p_config.data_path)
     {
-        if let Err(s) = fs::create_dir(&datapath) {
-            return Err(WaniError::Generic(format!("Could not create datapath at {}\nError: {}", datapath.display(), s)));
+        if let Err(s) = fs::create_dir(&p_config.data_path) {
+            return Err(WaniError::Generic(format!("Could not create datapath at {}\nError: {}", p_config.data_path.display(), s)));
         }
     }
 
-    let mut db_path = PathBuf::from(&datapath);
+    let mut db_path = PathBuf::from(&p_config.data_path);
     db_path.push("wani_cache.db");
     return Ok(db_path);
 }
 
-async fn setup_async_connection(args: &Args) -> Result<AsyncConnection, WaniError> {
-    Ok(AsyncConnection::open(&get_db_path(args)?).await?)
+async fn setup_async_connection(p_config: &ProgramConfig) -> Result<AsyncConnection, WaniError> {
+    Ok(AsyncConnection::open(&get_db_path(p_config)?).await?)
 }
 
-fn setup_connection(args: &Args) -> Result<Connection, WaniError> {
-    match Connection::open(&get_db_path(args)?) {
+fn setup_connection(p_config: &ProgramConfig    ) -> Result<Connection, WaniError> {
+    match Connection::open(&get_db_path(p_config)?) {
         Ok(c) => Ok(c),
         Err(e) => Err(WaniError::Generic(format!("{}", e))),
     }
@@ -2741,20 +2790,15 @@ fn get_program_config(args: &Args) -> Result<ProgramConfig, WaniError> {
     if let Some(path) = &args.configfile {
         configpath.push(path);
     }
+    else if let Ok(path) = std::env::var("WANI_CONFIG_PATH") {
+        configpath.push(path);
+    }
     else {
         match home::home_dir() {
             Some(h) => {
                 configpath.push(h);
                 configpath.push(".config");
                 configpath.push("wani");
-
-                if !Path::exists(&configpath)
-                {
-                    if let Err(s) = fs::create_dir(&configpath) {
-                        return Err(WaniError::Generic(format!("Could not create wani config folder at {}\nError: {}", configpath.display(), s)));
-                    }
-                }
-                configpath.push(".wani.conf");
             },
             None => {
                 return Err(WaniError::Generic(format!("Could not find home directory. Please manually specify configpath arg. Use \"wani -help\" for more details.")));
@@ -2762,11 +2806,17 @@ fn get_program_config(args: &Args) -> Result<ProgramConfig, WaniError> {
         };
     }
 
-    let mut config = ProgramConfig { 
-        auth: None, 
-        //configpath: configpath.clone(), 
-        colorblind: false,
-    };
+    if !Path::exists(&configpath)
+    {
+        if let Err(s) = fs::create_dir(&configpath) {
+            return Err(WaniError::Generic(format!("Could not create wani config folder at {}\nError: {}", configpath.display(), s)));
+        }
+    }
+    configpath.push(".wani.conf");
+
+    let mut auth = None;
+    let mut colorblind = false;
+    let mut datapath = None;
     if let Ok(lines) = read_lines(&configpath) {
         for line in lines {
             if let Ok(s) = line {
@@ -2777,28 +2827,56 @@ fn get_program_config(args: &Args) -> Result<ProgramConfig, WaniError> {
 
                 match words[0] {
                     "auth:" => {
-                        config.auth = Some(String::from(words[1]));
+                        auth = Some(String::from(words[1]));
                     },
                     "colorblind:" => {
-                        config.colorblind = match words[1] {
+                        colorblind = match words[1] {
                             "true" | "True" | "t" => true,
                             _ => false,
                         };
                     },
+                    "datapath:" => {
+                        let path = PathBuf::from_str(words[1]);
+                        if let Err(_) = path {
+                            return Err(WaniError::Generic(format!("Could not parse datapath from config file. Path: {}", words[1])));
+                        }
+                        datapath = Some(path.unwrap());
+                    }
                     _ => {},
                 }
             }
         }
     }
-    else {
-        return Err(WaniError::Generic(format!("Error reading config at: {}", configpath.display())));
-    }
 
     if let Some(a) = &args.auth {
-        config.auth = Some(String::from(a));
+        auth = Some(String::from(a));
     }
 
-    Ok(config)
+    let datapath = if let Some(dpath) = &args.datapath {
+        dpath.clone()
+    }
+    else  {
+        match datapath {
+            Some(d) => d,
+            None => {
+                match home::home_dir() {
+                    Some(mut h) => {
+                        h.push(".wani");
+                        h   
+                    },
+                    None => {
+                        return Err(WaniError::Generic("Could not find home directory. Please manually specify datapath arg. Use \"wani -help\" for more details.".into()));
+                    }
+                }
+            },
+        }
+    };
+
+    Ok(ProgramConfig { 
+        auth, 
+        data_path: datapath,
+        colorblind,
+    })
 }
 
 fn get_web_config(config: &ProgramConfig) -> Result<WaniWebConfig, WaniError> {
