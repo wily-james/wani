@@ -37,7 +37,7 @@ wani r
 
 ### FILE PATH
 
-Wani looks for a config file by default in "~/.config/wani/.wani.conf"
+Wani looks for a config file by default in "~/.config/wani/.wani.conf"  
 The path for the ".wani.conf" file can be overridden by specifying the config file as a command line argument:
 ```
 wani -c /some/path
