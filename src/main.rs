@@ -82,6 +82,7 @@ enum Command {
 struct ProgramConfig {
     auth: Option<String>,
     configpath: PathBuf,
+    colorblind: bool,
 }
 
 /// Info needed to make WaniKani web requests
@@ -315,7 +316,7 @@ async fn command_review(args: &Args) {
         Ok(())
     }
 
-    async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig) -> Result<(), WaniError> {
+    async fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig) -> Result<(), WaniError> {
         let term = Term::buffered_stdout();
         let rng = &mut thread_rng();
         let width = 80;
@@ -513,7 +514,8 @@ async fn command_review(args: &Args) {
                                 }
                             },
                         };
-                        (false, None, true)
+                        let tag = if p_config.colorblind { Some("Correct") } else { None };
+                        (false, tag, true)
                     },
                     wanidata::AnswerResult::Incorrect => {
                         failed += 1;
@@ -523,7 +525,8 @@ async fn command_review(args: &Args) {
                         else {
                             review.incorrect_reading_answers += 1;
                         }
-                        (false, Some("Incorrect"), false)
+                        let tag = if p_config.colorblind { Some("Incorrect") } else { None };
+                        (false, tag, false)
                     },
                     wanidata::AnswerResult::MatchesNonAcceptedAnswer => (true, Some("Answer not accepted. Try again"), false),
                 };
@@ -806,7 +809,7 @@ async fn command_review(args: &Args) {
                 return;
             }
 
-            let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config).await;
+            let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap(), &web_config, &p_config).await;
         },
     };
 }
@@ -1528,7 +1531,7 @@ fn get_program_config(args: &Args) -> Result<ProgramConfig, WaniError> {
         };
     }
 
-    let mut config = ProgramConfig { auth: None, configpath: configpath.clone() };
+    let mut config = ProgramConfig { auth: None, configpath: configpath.clone(), colorblind: false };
     if let Ok(lines) = read_lines(&configpath) {
         for line in lines {
             if let Ok(s) = line {
@@ -1540,6 +1543,12 @@ fn get_program_config(args: &Args) -> Result<ProgramConfig, WaniError> {
                 match words[0] {
                     "auth:" => {
                         config.auth = Some(String::from(words[1]));
+                    },
+                    "colorblind:" => {
+                        config.colorblind = match words[1] {
+                            "true" | "True" | "t" => true,
+                            _ => false,
+                        };
                     },
                     _ => {},
                 }
