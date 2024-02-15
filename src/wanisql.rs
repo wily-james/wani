@@ -1,11 +1,11 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::Transaction;
 
 use crate::{wanidata::{self, AuxMeaning, ContextSentence, PronunciationAudio, VocabReading}, WaniError};
 
 pub(crate) const CREATE_ASSIGNMENTS_TBL: &str = "create table if not exists assignments (
             id integer primary key,
-            available_at text,
+            available_at int,
             created_at text not null,
             hidden integer not null,
             srs_stage integer not null,
@@ -33,16 +33,20 @@ pub(crate) const SELECT_AVAILABLE_ASSIGNMENTS: &str = "select
                             srs_stage,
                             started_at,
                             subject_id,
-                            subject_type from assignments where available_at < datetime('now');";
+                            subject_type from assignments where available_at < ?1;";
 
 pub(crate) fn parse_assignment(r: &rusqlite::Row<'_>) -> Result<wanidata::Assignment, WaniError> {
     return Ok(wanidata::Assignment {
         id: r.get::<usize, i32>(0)?,
         data: wanidata::AssignmentData { 
             available_at: 
-                if let Some(t) = r.get::<usize, Option<String>>(1)? { 
-                    Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
-                } 
+                if let Some(t) = r.get::<usize, Option<i64>>(1)? { 
+                    match Utc.timestamp_opt(t, 0) {
+                        chrono::LocalResult::None => None,
+                        chrono::LocalResult::Single(s) => Some(s),
+                        chrono::LocalResult::Ambiguous(_, _) => None,
+                    }
+                }
                 else { 
                     None 
                 },
@@ -71,7 +75,7 @@ pub(crate) fn store_assignment(r: wanidata::Assignment, stmt: &mut Transaction<'
     let subj_type: usize = r.data.subject_type.into();
     let p = rusqlite::params!(
         format!("{}", r.id),
-        if let Some(available_at) = r.data.available_at { Some(available_at.to_rfc3339()) } else { None },
+        if let Some(available_at) = r.data.available_at { Some(available_at.timestamp()) } else { None },
         r.data.created_at.to_rfc3339(),
         r.data.hidden,
         r.data.srs_stage,

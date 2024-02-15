@@ -712,7 +712,7 @@ async fn command_review(args: &Args) {
                 //sync_all(&wc, &c, false).await;
             //}
             
-            let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, []).await;
+            let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, [Utc::now().timestamp()]).await;
             if let Err(e) = assignments {
                 println!("Error loading assignments. Error: {}", e);
                 return;
