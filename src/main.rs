@@ -78,6 +78,7 @@ enum Command {
 /// Info saved to program config file
 struct ProgramConfig {
     auth: Option<String>,
+    configpath: PathBuf,
 }
 
 /// Info needed to make WaniKani web requests
@@ -259,6 +260,36 @@ fn command_query_radicals(args: &Args) {
     };
 }
 
+fn play_audio(subject: &Subject, audio_cache: &PathBuf) {
+    let audio = match subject {
+        Subject::Radical(r) => (r.id, None),
+        Subject::Kanji(k) => (k.id, None),
+        Subject::Vocab(d) => (d.id, d.data.pronunciation_audios.first()),
+        Subject::KanaVocab(d) => (d.id, d.data.pronunciation_audios.first()),
+    };
+
+    if let Some(a) = audio.1 {
+        let ext;
+        const MPEG: &str = "audio/mpeg";
+        const OGG: &str = "audio/ogg";
+        if a.content_type == MPEG {
+            ext = Some(".mpeg");
+        }
+        else if a.content_type == OGG {
+            ext = Some(".ogg");
+        }
+        else {
+            ext = None;
+        }
+
+        let id = audio.0;
+        let mut audio_path = audio_cache.clone();
+        if let Some(ext) = ext {
+            audio_path.push(format!("{}_0.{}", id, ext));
+        }
+    }
+}
+
 async fn command_review(args: &Args) {
     fn print_review_screen(term: &Term, done: usize, guesses: usize, failed: usize, total_reviews: usize, width: usize, align: console::Alignment, char_line: &str, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
         term.clear_screen()?;
@@ -277,7 +308,7 @@ async fn command_review(args: &Args) {
         Ok(())
     }
 
-    fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>) -> Result<(), WaniError> {
+    fn do_reviews(mut assignments: Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: &PathBuf) -> Result<(), WaniError> {
             let term = Term::buffered_stdout();
             let rng = &mut thread_rng();
             let width = 80;
@@ -508,13 +539,15 @@ async fn command_review(args: &Args) {
                                     'f' | 'F' => {
                                         showing_info = !showing_info;
                                     },
+                                    'j' | 'J' => {
+                                        play_audio(subject, audio_cache);
+                                    },
                                     _ => {},
                                 }
                             },
                             _ => {
                             },
                         }
-
 
                         print_review_screen(&term, done, guesses, failed, total_reviews, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
                         if showing_info {
@@ -729,7 +762,13 @@ async fn command_review(args: &Args) {
                 subjects_by_id.insert(s.id, wanidata::Subject::KanaVocab(s));
             }
 
-            let _ = do_reviews(assignments, subjects_by_id);
+            let audio_cache = get_audio_path(&args);
+            if let Err(e) = audio_cache {
+                println!("{}", e);
+                return;
+            }
+
+            let _ = do_reviews(assignments, subjects_by_id, &audio_cache.unwrap());
         },
     };
 }
@@ -843,7 +882,12 @@ async fn get_all_cache_infos(conn: &AsyncConnection, ignore_cache: bool) -> Resu
 }
 
 async fn command_sync(args: &Args, ignore_cache: bool) {
-    let web_config = get_web_config(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+    }
+    let p_config = p_config.unwrap();
+    let web_config = get_web_config(&p_config);
     if let Err(_) = web_config {
         return;
     }
@@ -1168,7 +1212,12 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
 }
 
 async fn command_test_subject(args: &Args) {
-    let web_config = get_web_config(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+    }
+    let p_config = p_config.unwrap();
+    let web_config = get_web_config(&p_config);
     if let Err(e) = web_config {
         println!("{}", e);
         return;
@@ -1233,7 +1282,12 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
 }
 
 async fn command_summary(args: &Args) {
-    let web_config = get_web_config(&args);
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+    }
+    let p_config = p_config.unwrap();
+    let web_config = get_web_config(&p_config);
     if let Err(e) = web_config {
         println!("{}", e);
         return;
@@ -1287,6 +1341,20 @@ fn test_handle_wani_resp(w: WaniResp) -> () {
     }
 }
 
+fn get_audio_path(args: &Args) -> Result<PathBuf, WaniError> {
+    let mut db_path = get_db_path(args)?;
+    db_path.push("audio");
+    
+    if !Path::exists(&db_path)
+    {
+        if let Err(s) = fs::create_dir(&db_path) {
+            return Err(WaniError::Generic(format!("Could not create audio cache path at {}\nError: {}", db_path.display(), s)));
+        }
+    }
+
+    return Ok(db_path);
+}
+
 fn get_db_path(args: &Args) -> Result<PathBuf, WaniError> {
     let mut datapath = PathBuf::new();
     if let Some(dpath) = &args.datapath {
@@ -1327,7 +1395,7 @@ fn setup_connection(args: &Args) -> Result<Connection, WaniError> {
     }
 }
 
-fn get_web_config(args: &Args) -> Result<WaniWebConfig, WaniError> {
+fn get_program_config(args: &Args) -> Result<ProgramConfig, WaniError> {
     let mut configpath = PathBuf::new();
     if let Some(path) = &args.configfile {
         configpath.push(path);
@@ -1353,7 +1421,7 @@ fn get_web_config(args: &Args) -> Result<WaniWebConfig, WaniError> {
         };
     }
 
-    let mut config = ProgramConfig { auth: None };
+    let mut config = ProgramConfig { auth: None, configpath: configpath.clone() };
     if let Ok(lines) = read_lines(&configpath) {
         for line in lines {
             if let Ok(s) = line {
@@ -1372,25 +1440,27 @@ fn get_web_config(args: &Args) -> Result<WaniWebConfig, WaniError> {
         }
     }
     else {
-        println!("Error reading config at: {}", configpath.display());
+        return Err(WaniError::Generic(format!("Error reading config at: {}", configpath.display())));
     }
 
-    let auth: String;
     if let Some(a) = &args.auth {
-        auth = String::from(a);
+        config.auth = Some(String::from(a));
     }
-    else if let Some(a) = config.auth {
-        auth = String::from(a);
+
+    Ok(config)
+}
+
+fn get_web_config(config: &ProgramConfig) -> Result<WaniWebConfig, WaniError> {
+    if let Some(a) = &config.auth {
+        return Ok(WaniWebConfig { 
+            client: Client::new(),
+            auth: a.into(),
+            revision: "20170710".to_owned()
+        });
     }
     else {
         return Err(WaniError::Generic(format!("Need to specify a wanikani access token")));
     }
-
-    return Ok(WaniWebConfig { 
-        client: Client::new(),
-        auth,
-        revision: "20170710".to_owned()
-    });
 }
 
 fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
