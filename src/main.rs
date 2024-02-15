@@ -4,7 +4,7 @@ mod wanisql;
 use crate::wanidata::{Assignment, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::HashMap;
-use std::io::{BufReader};
+use std::io::BufReader;
 use std::ops::Deref;
 use std::sync::PoisonError;
 use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
@@ -479,8 +479,8 @@ async fn command_review(args: &Args) {
                 // Tuple (retry, toast, correct)
                 let tuple = match answer_result {
                     wanidata::AnswerResult::FuzzyCorrect => todo!(),
-                    wanidata::AnswerResult::BadFormatting => todo!(),
-                    wanidata::AnswerResult::KanaWhenMeaning => todo!(),
+                    wanidata::AnswerResult::BadFormatting => (true, Some("Try again!"), false),
+                    wanidata::AnswerResult::KanaWhenMeaning => (true, Some("We want the reading, not the meaning."), false),
                     wanidata::AnswerResult::Correct => {
                         review.status = match subject {
                             Subject::Radical(_) | Subject::KanaVocab(_) => 
