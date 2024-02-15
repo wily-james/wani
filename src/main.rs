@@ -8,10 +8,12 @@ use std::error::Error;
 use std::io::BufReader;
 use std::io::Write;
 use std::ops::Deref;
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use wanidata::ContextSentence;
 use wanidata::WaniFmtArgs;
+use wanisql::parse_review;
 use std::sync::{Arc, PoisonError}; use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
@@ -410,6 +412,9 @@ async fn command_review(args: &Args) {
             }
             let mut tx = tx.unwrap();
             for (_, review) in rev.deref() {
+                let _ = tx.execute(wanisql::REMOVE_REVIEW, [review.assignment_id]);
+            }
+            for (_, review) in rev.deref() {
                 let _ = 
                     match wanisql::store_review(&review, &mut tx) {
                         Ok(_) => {},
@@ -420,8 +425,15 @@ async fn command_review(args: &Args) {
             Ok(())
         }).await?;
 
+
+        save_reviews_to_wanikani(reviews.deref().iter().map(|t| t.1), rate_limit, web_config, conn).await?;
+        Ok(())
+    }
+
+    async fn save_reviews_to_wanikani<'a, I>(reviews: I, rate_limit: &RateLimitBox, web_config: &WaniWebConfig, conn: &AsyncConnection) -> Result<Vec<wanidata::Review>, WaniError>
+        where I: Iterator<Item = &'a NewReview> {
         let mut join_set = JoinSet::new();
-        for (_, review) in reviews.deref() {
+        for review in reviews {
             if let ReviewStatus::Done = review.status {
                 let new_review = wanidata::NewReviewRequest {
                     review: review.clone()
@@ -445,6 +457,7 @@ async fn command_review(args: &Args) {
 
         let mut had_connection_issue = false;
         let mut errors = vec![];
+        let mut saved_reviews = vec![];
         while let Some(response) = join_set.join_next().await {
             if let Ok(response) = response {
                 match response {
@@ -456,6 +469,7 @@ async fn command_review(args: &Args) {
                                     conn.execute(wanisql::REMOVE_REVIEW, params![ass_id])?;
                                     Ok(())
                                 }).await?;
+                                saved_reviews.push(r);
 
                                 if let Some(resources) = wani.resources_updated {
                                     if let Some(assignment) = resources.assignment {
@@ -501,11 +515,12 @@ async fn command_review(args: &Args) {
             println!("{}", e);
         }
 
-        Ok(())
+        Ok(saved_reviews)
     }
 
-    async fn do_reviews(assignments: &mut Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, conn: &AsyncConnection, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
+    async fn do_reviews(assignments: &mut Vec<Assignment>, subjects: HashMap<i32, Subject>, audio_cache: PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, conn: &AsyncConnection, rate_limit: &RateLimitBox, first_batch: Option<Vec<(Assignment, NewReview)>>) -> Result<(), WaniError> {
         assignments.reverse();
+        let mut first_batch = first_batch;
         let batch_size = min(20, assignments.len());
         let (audio_tx, mut rx) = mpsc::channel::<AudioMessage>(5);
         let audio_web_config = web_config.clone();
@@ -522,26 +537,52 @@ async fn command_review(args: &Args) {
         });
 
         let mut review_result = None;
+        let mut first_reviews = None;
         let total_assignments = assignments.len();
         while assignments.len() > 0 {
-            let mut batch = Vec::with_capacity(batch_size);
-            assignments.shuffle(&mut thread_rng());
-            for i in (assignments.len() - batch_size..assignments.len()).rev() {
-                batch.push(assignments.remove(i));
-            }
+            let mut batch = match first_batch { 
+                None => { 
+                    let mut b = Vec::with_capacity(batch_size);
+                    assignments.shuffle(&mut thread_rng());
+                    for i in (assignments.len() - batch_size..assignments.len()).rev() {
+                        b.push(assignments.remove(i));
+                    }
+                    b
+                },
+                Some(b) => {
+                    println!("Resuming saved batch of reviews");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let mut batch = Vec::with_capacity(b.len());
+                    let mut revs = HashMap::with_capacity(b.len());
+                    for (assignment, review) in b {
+                        batch.push(assignment);
+                        revs.insert(review.assignment_id, review);
+                    }
+                    first_batch = None;
+                    first_reviews = Some(revs);
+                    batch
+                }
+            };
 
-            let mut reviews = HashMap::with_capacity(batch.len());
-            let now = Utc::now();
-            for nr in batch.iter().map(|a| wanidata::NewReview {
-                id: None,
-                assignment_id: a.id,
-                created_at: now,
-                incorrect_meaning_answers: 0,
-                incorrect_reading_answers: 0,
-                status: wanidata::ReviewStatus::NotStarted,
-            }) {
-                reviews.insert(nr.assignment_id, nr);
-            }
+            let mut reviews = if let Some(r) = first_reviews { 
+                first_reviews = None;
+                r
+            } else {
+                let mut reviews = HashMap::with_capacity(batch.len());
+                let now = Utc::now();
+                for nr in batch.iter().map(|a| wanidata::NewReview {
+                    id: None,
+                    assignment_id: a.id,
+                    created_at: now,
+                    incorrect_meaning_answers: 0,
+                    incorrect_reading_answers: 0,
+                    status: wanidata::ReviewStatus::NotStarted,
+                    available_at: a.data.available_at,
+                }) {
+                    reviews.insert(nr.assignment_id, nr);
+                }
+                reviews
+            };
 
             let res = do_reviews_inner(&subjects, web_config, p_config, image_cache, &mut reviews, &mut batch, total_assignments, &audio_tx, conn).await;
             if let Err(e) = &res {
@@ -956,15 +997,15 @@ async fn command_review(args: &Args) {
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
-            //if let Ok(wc) = web_config {
-                //sync_all(&wc, &c, false).await;
-            //}
-            
+            let mut ass_cache_info = CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default() };
             let mut c_infos = get_all_cache_infos(&c, false).await;
             if let Ok(c_infos) = &mut c_infos {
-                println!("Syncing assignments. . .");
-                let _ = sync_assignments(&c, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()})).await;
+                if let Some(info) = c_infos.remove(&CACHE_TYPE_SUBJECTS) {
+                    ass_cache_info = info;
+                }
             }
+            println!("Syncing assignments. . .");
+            let _ = sync_assignments(&c, &web_config, ass_cache_info).await;
 
             let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, [Utc::now().timestamp()]).await;
             if let Err(e) = assignments {
@@ -975,6 +1016,34 @@ async fn command_review(args: &Args) {
             if assignments.len() == 0 {
                 println!("No assignments for now.");
                 return;
+            }
+
+            let existing_reviews = load_existing_reviews(&c, &assignments).await;
+            let existing_reviews = match existing_reviews {
+                Ok(existing_reviews) => { 
+                    //println!("Invalid Reviews: {}, Finished reviews: {}, In progress reviews: {}", existing_reviews.invalid_reviews.len(), existing_reviews.finished_reviews.len(), existing_reviews.in_progress_reviews.len());
+                    existing_reviews 
+                },
+                Err(e) => {
+                    println!("Error loading existing reviews: {}", e);
+                    LoadedReviews::default()
+                },
+            };
+
+            for review in existing_reviews.invalid_reviews {
+                let _ = c.call(move |conn| {
+                    conn.execute(wanisql::REMOVE_REVIEW, params![review.assignment_id])?;
+                    Ok(())
+                }).await;
+            }
+
+            let res = save_reviews_to_wanikani(existing_reviews.finished_reviews.iter(), &rate_limit, &web_config, &c).await;
+            if let Ok(saved_reviews) = res {
+                for review in saved_reviews {
+                    if let Some(t) = assignments.iter().find_position(|a| a.id == review.data.assignment_id) {
+                        assignments.remove(t.0);
+                    }
+                }
             }
 
             let mut r_ids = vec![];
@@ -989,6 +1058,15 @@ async fn command_review(args: &Args) {
                     SubjectType::KanaVocab => kv_ids.push(ass.data.subject_id),
                 }
             }
+            let first_batch = if existing_reviews.in_progress_reviews.len() == 0 { None } else {
+                let mut first_batch = Vec::with_capacity(existing_reviews.in_progress_reviews.len());
+                for rev in existing_reviews.in_progress_reviews {
+                    if let Some((index, _)) = assignments.iter().find_position(|a| a.id == rev.assignment_id) {
+                        first_batch.push((assignments.remove(index), rev));
+                    }
+                }
+                Some(first_batch)
+            };
 
             let mut subjects_by_id = HashMap::new();
 
@@ -1140,7 +1218,7 @@ async fn command_review(args: &Args) {
                 println!("\nreceived Ctrl+C!\nSaving reviews...");
             });
 
-            let res = do_reviews(&mut assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit).await;
+            let res = do_reviews(&mut assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit, first_batch).await;
             match res {
                 Ok(_) => {},
                 Err(e) => {println!("{:?}", e)},
@@ -1786,6 +1864,75 @@ fn split_str_by_len(s: &str, l: usize, v: &mut Vec<String>) {
     }
 }
 
+#[derive(Default)]
+struct LoadedReviews {
+    invalid_reviews: Vec<NewReview>,
+    finished_reviews: Vec<NewReview>,
+    in_progress_reviews: Vec<NewReview>,
+}
+
+async fn load_existing_reviews(c: &AsyncConnection, assignments: &Vec<wanidata::Assignment>) -> Result<LoadedReviews, tokio_rusqlite::Error> {
+    let mut available_at_by_id = HashMap::with_capacity(assignments.len());
+    for ass in assignments {
+        if let Some(available_at) = ass.data.available_at {
+            available_at_by_id.insert(ass.id, available_at);
+        }
+    }
+
+    return c.call(move |c| { 
+        let stmt = c.prepare(wanisql::SELECT_REVIEWS);
+        match stmt {
+            Err(e) => {
+                return Err(tokio_rusqlite::Error::Rusqlite(e));
+            },
+            Ok(mut stmt) => {
+                match stmt.query_map([], |r| parse_review(r)
+                                     .or_else
+                                     (|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                    Ok(reviews) => {
+                        let mut loaded_revs = LoadedReviews {
+                            invalid_reviews: vec![],
+                            finished_reviews: vec![],
+                            in_progress_reviews: vec![]
+                         };
+
+                        for r in reviews {
+                            if let Err(r) = r {
+                                println!("Error loading review: {}", r);
+                                continue;
+                            }
+                            let r = r.unwrap();
+                            if let Some(available_at) = r.available_at {
+                                if let Some(ass_available) = available_at_by_id.get(&r.assignment_id) {
+                                    if ass_available != &available_at {
+                                        loaded_revs.invalid_reviews.push(r);
+                                        continue;
+                                    }
+                                }
+                                else {
+                                    // If there is no assignment for a review, invalidate it.
+                                    loaded_revs.invalid_reviews.push(r);
+                                    continue;
+                                }
+                            }
+
+                            match r.status {
+                                ReviewStatus::Done => {
+                                    loaded_revs.finished_reviews.push(r);
+                                },
+                                _ => loaded_revs.in_progress_reviews.push(r),
+                            }
+                        }
+
+                        Ok(loaded_revs)
+                    },
+                    Err(e) => {Err(tokio_rusqlite::Error::Rusqlite(e))},
+                }
+            }
+        }
+    }).await;
+}
+
 async fn select_data<T, F, P>(sql: &'static str, c: &AsyncConnection, parse_fn: F, params: P) -> Result<Vec<T>, tokio_rusqlite::Error> 
 where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_>) -> Result<T, WaniError>, P: Send + Sync + 'static + rusqlite::Params {
     return c.call(move |c| { 
@@ -2184,6 +2331,7 @@ fn setup_db(c: Connection) -> Result<(), SqlError> {
                 CACHE_TYPE_ASSIGNMENTS, 
               ])?;
 
+    //c.execute("drop table new_reviews;", [])?;
     c.execute(wanisql::CREATE_REVIEWS_TBL, [])?;
     c.execute(wanisql::CREATE_RADICALS_TBL, [])?;
     c.execute(wanisql::CREATE_KANJI_TBL, [])?;

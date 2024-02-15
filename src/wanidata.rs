@@ -181,6 +181,7 @@ pub struct NewReview {
     pub id: Option<i32>,
 
     pub assignment_id: i32,
+    pub available_at: Option<DateTime<Utc>>,
 
     #[serde(skip_serializing)]
     pub created_at: DateTime<Utc>,
@@ -197,6 +198,7 @@ impl Clone for NewReview {
         NewReview {
             id: self.id,
             assignment_id: self.assignment_id,
+            available_at: self.available_at,
             created_at: self.created_at,
             incorrect_meaning_answers: self.incorrect_meaning_answers,
             incorrect_reading_answers: self.incorrect_reading_answers,

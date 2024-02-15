@@ -9,7 +9,8 @@ pub(crate) const CREATE_REVIEWS_TBL: &str = "create table if not exists new_revi
             created_at text not null,
             incorrect_meaning_answers int not null,
             incorrect_reading_answers int not null,
-            status integer not null
+            status integer not null,
+            available_at text
         )";
 
 pub(crate) const INSERT_REVIEW: &str = "replace into new_reviews
@@ -18,16 +19,18 @@ pub(crate) const INSERT_REVIEW: &str = "replace into new_reviews
                              created_at,
                              incorrect_meaning_answers,
                              incorrect_reading_answers,
-                             status)
-                            values (?1, ?2, ?3, ?4, ?5, ?6)";
+                             status,
+                             available_at)
+                            values (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
 pub(crate) const INSERT_REVIEW_NO_ID: &str = "insert into new_reviews
                             (assignment_id,
                              created_at,
                              incorrect_meaning_answers,
                              incorrect_reading_answers,
-                             status)
-                            values (?1, ?2, ?3, ?4, ?5)";
+                             status,
+                             available_at)
+                            values (?1, ?2, ?3, ?4, ?5, ?6)";
 
 pub(crate) const SELECT_REVIEWS: &str = "select 
                             id,
@@ -35,7 +38,8 @@ pub(crate) const SELECT_REVIEWS: &str = "select
                             created_at,
                             incorrect_meaning_answers,
                             incorrect_reading_answers,
-                            status from new_reviews;";
+                            status,
+                            available_at from new_reviews;";
 
 pub(crate) const CLEAR_REVIEWS: &str = "delete from new_reviews";
 
@@ -48,7 +52,14 @@ pub(crate) fn parse_review(r: &rusqlite::Row<'_>) -> Result<wanidata::NewReview,
         created_at: DateTime::parse_from_rfc3339(&r.get::<usize, String>(2)?)?.with_timezone(&Utc),
         incorrect_meaning_answers: r.get::<usize, u16>(3)?,
         incorrect_reading_answers: r.get::<usize, u16>(4)?,
-        status: wanidata::ReviewStatus::from(r.get::<usize, usize>(5)?)
+        status: wanidata::ReviewStatus::from(r.get::<usize, usize>(5)?),
+        available_at: 
+            if let Some(t) = r.get::<usize, Option<String>>(6)? { 
+                Some(DateTime::parse_from_rfc3339(&t)?.with_timezone(&Utc))
+            } 
+            else { 
+                None 
+            },
     });
 }
 
@@ -62,7 +73,9 @@ pub(crate) fn store_review(r: &wanidata::NewReview, stmt: &mut Transaction<'_>) 
             r.created_at.to_rfc3339(),
             r.incorrect_meaning_answers,
             r.incorrect_reading_answers,
-            status);
+            status,
+            if let Some(available_at) = r.available_at { Some(available_at.to_rfc3339()) } else { None },
+            );
         return stmt.execute(INSERT_REVIEW, p);
     }
     else {
@@ -71,7 +84,9 @@ pub(crate) fn store_review(r: &wanidata::NewReview, stmt: &mut Transaction<'_>) 
             r.created_at.to_rfc3339(),
             r.incorrect_meaning_answers,
             r.incorrect_reading_answers,
-            status);
+            status,
+            if let Some(available_at) = r.available_at { Some(available_at.to_rfc3339()) } else { None },
+            );
         return stmt.execute(INSERT_REVIEW_NO_ID, p);
     }
 }
