@@ -3,6 +3,7 @@ use chrono::{
     DateTime,
     Utc,
 };
+use wana_kana::IsJapaneseChar;
 
 #[derive(Debug, Deserialize)]
 pub struct WaniResp {
@@ -462,6 +463,7 @@ pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool, kana_
 
 fn is_correct<T, U>(meanings: &Vec<T>, readings: &Vec<U>, guess: &str, kana_input: &str) -> AnswerResult
 where T: Answer, U: Answer {
+    let mut expect_numeric = false;
     let mut best = AnswerResult::Incorrect;
     for m in meanings {
         let (meaning, is_accepted_answer) = m.answer();
@@ -475,6 +477,22 @@ where T: Answer, U: Answer {
 
         if let AnswerResult::Correct = is_correct::<U, T>(readings, &vec![], kana_input, "") {
             return AnswerResult::KanaWhenMeaning;
+        }
+
+        if meaning.chars().any(|c| c.is_numeric()) {
+            expect_numeric = true;
+        }
+    }
+
+    if let AnswerResult::Incorrect = best {
+        if guess.chars().any(|c| {
+            if expect_numeric {
+                return !c.is_alphanumeric() && !c.is_kana();
+            }
+
+            !c.is_alphabetic() && !c.is_kana()
+        }) {
+            return AnswerResult::BadFormatting;
         }
     }
 
@@ -539,200 +557,41 @@ pub fn format_wani_text(s: &str, args: &WaniFmtArgs) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Deref;
-
     use chrono::Utc;
-
     use crate::wanidata::AnswerResult;
-
     use super::{format_wani_text, is_correct_answer, AuxMeaning, KanaVocab, KanaVocabData, Kanji, KanjiData, KanjiReading, Meaning, Radical, RadicalData, Subject, Vocab, VocabData, VocabReading, WaniFmtArgs, EMPTY_ARGS};
 
-    fn get_kanji(meanings: Vec<Meaning>, readings: Vec<KanjiReading>, aux_meanings: Vec<AuxMeaning>) -> Kanji {
-        Kanji {
-            id: 1,
-            data: KanjiData {
-                aux_meanings,
-                readings,
-                meanings,
-                created_at: Utc::now(),
-                document_url: "".into(),
-                hidden_at: None,
-                lesson_position: 1,
-                level: 1,
-                meaning_mnemonic: "".into(),
-                slug: "".into(),
-                spaced_repetition_system_id: 1,
-                characters: "".into(),
-                amalgamation_subject_ids: vec![],
-                component_subject_ids: vec![],
-                meaning_hint: None,
-                reading_hint: None,
-                reading_mnemonic: "".into(),
-                visually_similar_subject_ids: vec![],
-            },
-        }
-    }
-
-    fn get_standard_radical() -> Radical {
-        let meanings = vec![
-            Meaning {
-                meaning: "not_accepted".into(),
-                primary: false,
-                accepted_answer: false,
-            },
-            Meaning {
-                meaning: "accepted".into(),
-                primary: true,
-                accepted_answer: true,
-            },
-        ];
-
-        get_radical(meanings, vec![])
-    }
-
-    fn get_radical(meanings: Vec<Meaning>, aux_meanings: Vec<AuxMeaning>) -> Radical {
-        Radical {
-            id: 1,
-            data: RadicalData {
-                aux_meanings,
-                meanings,
-                created_at: Utc::now(),
-                document_url: "".into(),
-                hidden_at: None,
-                lesson_position: 1,
-                level: 1,
-                meaning_mnemonic: "".into(),
-                slug: "".into(),
-                spaced_repetition_system_id: 1,
-                amalgamation_subject_ids: vec![],
-                characters: None,
-                character_images: vec![],
-            }
-        }
-    }
-
-    fn get_standard_kana_vocab() -> KanaVocab {
-    let meanings = vec![
-            Meaning {
-                meaning: "not_accepted".into(),
-                primary: false,
-                accepted_answer: false,
-            },
-            Meaning {
-                meaning: "accepted".into(),
-                primary: true,
-                accepted_answer: true,
-            },
-        ];
-        get_kana_vocab(meanings, vec![])
-    }
-
-    fn get_kana_vocab(meanings: Vec<Meaning>, aux_meanings: Vec<AuxMeaning>) -> KanaVocab {
-        KanaVocab {
-            id: 1,
-            data: KanaVocabData {
-                aux_meanings,
-                meanings,
-                created_at: Utc::now(),
-                document_url: "".into(),
-                hidden_at: None,
-                lesson_position: 1,
-                level: 1,
-                meaning_mnemonic: "".into(),
-                slug: "".into(),
-                spaced_repetition_system_id: 1,
-                characters: "".into(),
-                context_sentences: vec![],
-                parts_of_speech: vec![],
-                pronunciation_audios: vec![],
-            }
-        }
-    }
-
-    fn get_standard_vocab() -> super::Vocab {
-        let meanings = vec![
-            Meaning {
-                meaning: "not_accepted".into(),
-                primary: false,
-                accepted_answer: false,
-            },
-            Meaning {
-                meaning: "accepted".into(),
-                primary: true,
-                accepted_answer: true,
-            },
-        ];
-        let vocab_readings = vec![
-            VocabReading { 
-                reading: "not_はがねの".into(), 
-                primary: true, 
-                accepted_answer: false, 
-            },
-            VocabReading { 
-                reading: "はがねの".into(), 
-                primary: true, 
-                accepted_answer: true, 
-            },
-        ];
-        get_vocab(meanings, vocab_readings, vec![])
-    }
-
-    fn get_vocab(meanings: Vec<Meaning>, readings: Vec<VocabReading>, aux_meanings: Vec<AuxMeaning>) -> Vocab {
-        Vocab {
-            id: 1,
-            data: VocabData {
-                readings,
-                meanings,
-                aux_meanings,
-                created_at: Utc::now(),
-                document_url: "".into(),
-                hidden_at: None,
-                lesson_position: 1,
-                level: 1,
-                meaning_mnemonic: "".into(),
-                slug: "".into(),
-                spaced_repetition_system_id: 1,
-                characters: "".into(),
-                component_subject_ids: vec![],
-                context_sentences: vec![],
-                parts_of_speech: vec![],
-                pronunciation_audios: vec![],
-                reading_mnemonic: "".into(),
-            }
-        }
-    }
-
-    fn get_standard_kanji() -> Kanji {
-        let meanings = vec![
-            Meaning {
-                meaning: "not_accepted".into(),
-                primary: false,
-                accepted_answer: false,
-            },
-            Meaning {
-                meaning: "accepted".into(),
-                primary: true,
-                accepted_answer: true,
-            },
-        ];
-        let kanji_readings = vec![
-            KanjiReading { 
-                reading: "not_はがねの".into(), 
-                primary: true, 
-                accepted_answer: false, 
-                r#type: super::KanjiType::Nanori 
-            },
-            KanjiReading { 
-                reading: "はがねの".into(), 
-                primary: true, 
-                accepted_answer: true, 
-                r#type: super::KanjiType::Nanori 
-            },
-        ];
-        get_kanji(meanings, kanji_readings, vec![])
-    }
-
     // #region is_correct_answer Kanji
+
+    #[test]
+    fn is_correct_answer_illegal_chars() {
+        let is_meaning = true;
+        let kanji = get_standard_kanji();
+        let subj = Subject::Kanji(kanji);
+        for guess in "0123456789!@#$%^&*()-_=+`~[[]]\\;:'\",<.>/?".chars() {
+            let guess = String::from(guess);
+            let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+            assert!(matches!(result, AnswerResult::BadFormatting));
+        }
+    }
+
+    #[test]
+    fn is_correct_answer_expects_number_allows_numbers() {
+        let is_meaning = true;
+        let mut kanji = get_standard_kanji();
+        kanji.data.meanings.push(Meaning { 
+            meaning: "42".into(), 
+            primary: false, 
+            accepted_answer: true 
+        });
+
+        let subj = Subject::Kanji(kanji);
+        let guess = "43";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
 
     #[test]
     fn is_correct_answer_accepted_kanji_meaning() {
@@ -1031,6 +890,192 @@ mod tests {
     }
 
     // #endregion is_correct_answer Radical
+
+    fn get_kanji(meanings: Vec<Meaning>, readings: Vec<KanjiReading>, aux_meanings: Vec<AuxMeaning>) -> Kanji {
+        Kanji {
+            id: 1,
+            data: KanjiData {
+                aux_meanings,
+                readings,
+                meanings,
+                created_at: Utc::now(),
+                document_url: "".into(),
+                hidden_at: None,
+                lesson_position: 1,
+                level: 1,
+                meaning_mnemonic: "".into(),
+                slug: "".into(),
+                spaced_repetition_system_id: 1,
+                characters: "".into(),
+                amalgamation_subject_ids: vec![],
+                component_subject_ids: vec![],
+                meaning_hint: None,
+                reading_hint: None,
+                reading_mnemonic: "".into(),
+                visually_similar_subject_ids: vec![],
+            },
+        }
+    }
+
+    fn get_standard_radical() -> Radical {
+        let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+
+        get_radical(meanings, vec![])
+    }
+
+    fn get_radical(meanings: Vec<Meaning>, aux_meanings: Vec<AuxMeaning>) -> Radical {
+        Radical {
+            id: 1,
+            data: RadicalData {
+                aux_meanings,
+                meanings,
+                created_at: Utc::now(),
+                document_url: "".into(),
+                hidden_at: None,
+                lesson_position: 1,
+                level: 1,
+                meaning_mnemonic: "".into(),
+                slug: "".into(),
+                spaced_repetition_system_id: 1,
+                amalgamation_subject_ids: vec![],
+                characters: None,
+                character_images: vec![],
+            }
+        }
+    }
+
+    fn get_standard_kana_vocab() -> KanaVocab {
+    let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+        get_kana_vocab(meanings, vec![])
+    }
+
+    fn get_kana_vocab(meanings: Vec<Meaning>, aux_meanings: Vec<AuxMeaning>) -> KanaVocab {
+        KanaVocab {
+            id: 1,
+            data: KanaVocabData {
+                aux_meanings,
+                meanings,
+                created_at: Utc::now(),
+                document_url: "".into(),
+                hidden_at: None,
+                lesson_position: 1,
+                level: 1,
+                meaning_mnemonic: "".into(),
+                slug: "".into(),
+                spaced_repetition_system_id: 1,
+                characters: "".into(),
+                context_sentences: vec![],
+                parts_of_speech: vec![],
+                pronunciation_audios: vec![],
+            }
+        }
+    }
+
+    fn get_standard_vocab() -> super::Vocab {
+        let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+        let vocab_readings = vec![
+            VocabReading { 
+                reading: "not_はがねの".into(), 
+                primary: true, 
+                accepted_answer: false, 
+            },
+            VocabReading { 
+                reading: "はがねの".into(), 
+                primary: true, 
+                accepted_answer: true, 
+            },
+        ];
+        get_vocab(meanings, vocab_readings, vec![])
+    }
+
+    fn get_vocab(meanings: Vec<Meaning>, readings: Vec<VocabReading>, aux_meanings: Vec<AuxMeaning>) -> Vocab {
+        Vocab {
+            id: 1,
+            data: VocabData {
+                readings,
+                meanings,
+                aux_meanings,
+                created_at: Utc::now(),
+                document_url: "".into(),
+                hidden_at: None,
+                lesson_position: 1,
+                level: 1,
+                meaning_mnemonic: "".into(),
+                slug: "".into(),
+                spaced_repetition_system_id: 1,
+                characters: "".into(),
+                component_subject_ids: vec![],
+                context_sentences: vec![],
+                parts_of_speech: vec![],
+                pronunciation_audios: vec![],
+                reading_mnemonic: "".into(),
+            }
+        }
+    }
+
+    fn get_standard_kanji() -> Kanji {
+        let meanings = vec![
+            Meaning {
+                meaning: "not_accepted".into(),
+                primary: false,
+                accepted_answer: false,
+            },
+            Meaning {
+                meaning: "accepted".into(),
+                primary: true,
+                accepted_answer: true,
+            },
+        ];
+        let kanji_readings = vec![
+            KanjiReading { 
+                reading: "not_はがねの".into(), 
+                primary: true, 
+                accepted_answer: false, 
+                r#type: super::KanjiType::Nanori 
+            },
+            KanjiReading { 
+                reading: "はがねの".into(), 
+                primary: true, 
+                accepted_answer: true, 
+                r#type: super::KanjiType::Nanori 
+            },
+        ];
+        get_kanji(meanings, kanji_readings, vec![])
+    }
+
 
     const TEST_ARGS: WaniFmtArgs = WaniFmtArgs {
         radical_args: super::WaniTagArgs { 
