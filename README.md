@@ -42,6 +42,12 @@ auth: your_auth_token
 
 For more information about the wani config file, see [CONFIGURATION](#configuration).
 
+Next, run this command to sync wani with the WaniKani servers:
+```
+wani sync
+```
+This can take awhile, but when it's finished, wani should be ready to use online or offline!
+
 ## USE
 
 Get your wanikani summary:
