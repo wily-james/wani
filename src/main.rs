@@ -4,6 +4,7 @@ mod wanisql;
 use crate::wanidata::{Assignment, NewReview, PronunciationAudio, ReviewStatus, Subject, SubjectType, WaniData, WaniResp};
 use std::cmp::min;
 use std::collections::HashMap;
+use std::error::Error;
 use std::io::BufReader;
 use std::io::Write;
 use std::ops::Deref;
@@ -131,6 +132,7 @@ enum WaniError {
     Reqwest(#[from] reqwest::Error),
     Usvg(#[from] usvg::Error),
     RateLimit(Option<wanidata::RateLimit>),
+    Connection(),
 }
 
 impl<T> From<PoisonError<T>> for WaniError {
@@ -153,6 +155,7 @@ impl Display for WaniError {
             //WaniError::Audio => f.write_str("Audio Playback Error."),
             WaniError::Reqwest(e) => e.fmt(f),
             WaniError::Usvg(e) => e.fmt(f),
+            WaniError::Connection() => f.write_str("Error related to request connection."),
             WaniError::RateLimit(r) => {
                 match r {
                     Some(r) => f.write_str(&format!("Rate Limit Exceeded Error: {:?}", r)),
@@ -410,7 +413,7 @@ async fn command_review(args: &Args) {
                 let _ = 
                     match wanisql::store_review(&review, &mut tx) {
                         Ok(_) => {},
-                        Err(e) => println!("Error storing review: {}", e),
+                        Err(e) => println!("Error saving review locally: {}", e),
                     };
             }
             tx.commit()?;
@@ -440,6 +443,8 @@ async fn command_review(args: &Args) {
             }
         }
 
+        let mut had_connection_issue = false;
+        let mut errors = vec![];
         while let Some(response) = join_set.join_next().await {
             if let Ok(response) = response {
                 match response {
@@ -474,10 +479,26 @@ async fn command_review(args: &Args) {
                         }
                     },
                     Err(e) => {
-                        println!("Returned unexpected result when saving review. {}", e);
+                        match e {
+                            WaniError::Connection() => {
+                                had_connection_issue = true;
+                            }
+                            _ => {
+                                errors.push(format!("Unable to submit review to WaniKani. {}", e));
+                            },
+                        }
                     }
                 }
             }
+        }
+
+        if had_connection_issue {
+            println!("Unable to submit review to WaniKani due to internet connection issue.");
+            println!("Review progress is still saved locally.");
+        }
+
+        for e in errors {
+            println!("{}", e);
         }
 
         Ok(())
@@ -2355,7 +2376,13 @@ async fn send_throttled_request<'a, T: serde::Serialize + Sized>(info: RequestIn
 async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(WaniResp, reqwest::header::HeaderMap, Option<wanidata::RateLimit>), WaniError> {
     match response {
         Err(s) => {
-            Err(WaniError::Generic(format!("Error with request: {}", s)))
+            if s.is_connect() {
+                Err(WaniError::Connection())
+            }
+            else {
+                Err(WaniError::Generic(format!("Error with request: {}", s)))
+            }
+
         },
 
         Ok(r) => {
