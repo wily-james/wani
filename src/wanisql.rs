@@ -3,6 +3,26 @@ use rusqlite::Transaction;
 
 use crate::{wanidata::{self, AuxMeaning, ContextSentence, PronunciationAudio, VocabReading}, WaniError};
 
+pub(crate) const CREATE_USER_TBL: &str = "create table if not exists user (
+            id integer primary key,
+            user text not null
+        )";
+
+pub(crate) const INSERT_USER: &str = "replace into user
+                            (id, user)
+                            values (1, ?1)";
+
+pub(crate) const SELECT_USER: &str = "select * from user;";
+
+pub(crate) fn parse_user(r: &rusqlite::Row<'_>) -> Result<wanidata::User, WaniError> {
+    return Ok(serde_json::from_str(&r.get::<usize, String>(1)?)?);
+}
+
+pub(crate) fn store_user(r: &wanidata::User, conn: &mut rusqlite::Connection) -> Result<usize, WaniError>
+{
+    return Ok(conn.execute(INSERT_USER, [serde_json::to_string(r)?])?);
+}
+
 pub(crate) const CREATE_REVIEWS_TBL: &str = "create table if not exists new_reviews (
             id integer primary key,
             assignment_id integer not null,

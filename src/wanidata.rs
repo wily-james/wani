@@ -116,7 +116,7 @@ pub enum WaniData
     #[serde(rename="study_material")]
     StudyMaterial,
     #[serde(rename="user")]
-    User,
+    User(User),
     #[serde(rename="vocabulary")]
     Vocabulary(Vocab),
     #[serde(rename="voice_actor")]
@@ -286,6 +286,25 @@ pub struct PageData {
     pub per_page: i32,
     pub next_url: Option<String>,
     pub previous_url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct User
+{
+    pub data: UserData
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserData
+{
+    pub id: String,
+    pub subscription: Subscription,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Subscription {
+    pub max_level_granted: i32,
+    pub period_ends_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize, Debug)]

@@ -9,6 +9,7 @@ use std::io::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::time::Duration;
+use reqwest::header::HeaderValue;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use wanidata::ContextSentence;
@@ -93,6 +94,7 @@ enum Command {
     QueryVocab,
     QueryKanaVocab,
     QueryAssignments,
+    QueryUser,
     QueryReviews,
     ClearReviews,
     TestSubject,
@@ -216,6 +218,7 @@ async fn main() -> Result<(), WaniError> {
                 Command::QueryVocab => command_query_vocab(&args),
                 Command::QueryKanaVocab => command_query_kana_vocab(&args),
                 Command::QueryAssignments => command_query_assignments(&args),
+                Command::QueryUser=> command_query_user(&args),
                 Command::QueryReviews => command_query_reviews(&args),
                 Command::ClearReviews => command_clear_reviews(&args),
                 Command::TestSubject => command_test_subject(&args).await,
@@ -241,6 +244,34 @@ fn command_clear_reviews(args: &Args) {
         Err(e) => println!("{}", e),
         Ok(c) => {
             let _ = c.execute(wanisql::CLEAR_REVIEWS, []);
+        },
+    };
+}
+
+fn command_query_user(args: &Args) {
+    let p_config = get_program_config(args);
+    if let Err(e) = &p_config {
+        println!("{}", e);
+        return;
+    }
+    let p_config = p_config.unwrap();
+
+    let conn = setup_connection(&p_config);
+    match conn {
+        Err(e) => println!("{}", e),
+        Ok(c) => {
+            let mut stmt = c.prepare(wanisql::SELECT_USER).unwrap();
+            match stmt.query_map([], |a| wanisql::parse_user(a)
+                                 .or_else(|e| Err(rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Null, Box::new(e))))) {
+                Ok(reviews) => {
+                    for r in reviews {
+                        println!("{:?}", r);
+                    }
+                },
+                Err(e) => {
+                    println!("{}", e);
+                },
+            };
         },
     };
 }
@@ -1062,7 +1093,8 @@ async fn command_review(args: &Args) {
                 }
             }
             println!("Syncing assignments. . .");
-            let _ = sync_assignments(&c, &web_config, ass_cache_info, &rate_limit).await;
+            let is_user_restricted = is_user_restricted(&web_config, &c, &rate_limit).await;
+            let _ = sync_assignments(&c, &web_config, ass_cache_info, &rate_limit, is_user_restricted).await;
 
             let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, [Utc::now().timestamp()]).await;
 
@@ -1288,6 +1320,20 @@ async fn command_review(args: &Args) {
                     .into_iter()
                     .filter(|a| subjects_by_id.contains_key(&a.data.subject_id))
                     .collect_vec();
+            }
+            if is_user_restricted {
+                assignments = assignments
+                    .into_iter()
+                    .filter(|a| {
+                        match subjects_by_id.get(&a.data.subject_id) {
+                            None => false,
+                            Some(subj) => match subj {
+                                Subject::Radical(r) => r.data.level < 4,
+                                Subject::Kanji(k) => k.data.level < 4,
+                                Subject::Vocab(v) => v.data.level < 4,
+                                Subject::KanaVocab(kv) => kv.data.level < 4,
+                            }
+                        }}).collect_vec();
             }
 
             let res = do_reviews(&mut assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit, first_batch).await;
@@ -2117,19 +2163,25 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
     };
 }
 
-async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, cache_info: CacheInfo, rate_limit: &RateLimitBox) -> Result<SyncResult, WaniError> {
+async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, cache_info: CacheInfo, rate_limit: &RateLimitBox, is_user_restricted: bool) -> Result<SyncResult, WaniError> {
     let mut next_url = Some("https://api.wanikani.com/v2/assignments".to_owned());
 
     let mut assignments = vec![];
     let mut last_request_time: Option<DateTime<Utc>> = None;
     while let Some(url) = next_url {
         next_url = None;
+        let mut query: Vec<(&str, &str)> = vec![];
+        if let Some(after) = &cache_info.updated_after {
+            query.push(("updated_after", after));
+        }
+        if is_user_restricted {
+            query.push(("levels", "1,2,3"));
+        }
+        
         let info = RequestInfo::<()> {
             url: &url,
             method: RequestMethod::Get,
-            query: if let Some(after) = &cache_info.updated_after {
-                Some(vec![("updated_after", after)])
-            } else { None },
+            query: if query.len() > 0 { Some(query) } else { None }, 
             ..Default::default()
         };
 
@@ -2181,7 +2233,7 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
                // problem inserting
 
     if let Some(time) = last_request_time {
-        match update_cache(None, CACHE_TYPE_ASSIGNMENTS, time, &conn).await {
+        match update_cache(None, CACHE_TYPE_ASSIGNMENTS, time, None, &conn).await {
             Ok(_) => (),
             Err(e) => { 
                 println!("Failed to update assignment cache. Error: {}", e);
@@ -2195,21 +2247,165 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
     });
 }
 
+/// Whether user is restricted to the free-tier WaniKani (levels 1-3).
+/// This checks the user's subscription level, caching the result until the subscription ends,
+/// otherwise re-checking every week.
+async fn is_user_restricted(web_config: &WaniWebConfig, conn: &AsyncConnection, rate_limit: &RateLimitBox) -> bool {
+    match get_user_info(web_config, conn, rate_limit).await {
+        Ok(user) => {
+            user.data.subscription.max_level_granted < 60
+        },
+        Err(_) => {
+            false
+        },
+    }
+}
+
+async fn get_user_info(web_config: &WaniWebConfig, conn: &AsyncConnection, rate_limit: &RateLimitBox) -> Result<wanidata::User, WaniError> {
+    let mut cache_info = conn.call(|conn| {
+        let mut stmt = conn.prepare("select i.id, i.last_modified, i.updated_after, i.etag from cache_info i;")?;
+        let infos = stmt.query_map([],
+                                   |r| Ok(CacheInfo {
+                                       id: r.get::<usize, usize>(0)?,
+                                       last_modified: r.get::<usize, Option<String>>(1)?, 
+                                       updated_after: r.get::<usize, Option<String>>(2)?,
+                                       etag: r.get::<usize, Option<String>>(3)? }))?;
+
+        let mut map = HashMap::new();
+        for info in infos {
+            if let Ok(i) = info {
+                map.insert(i.id, i);
+            }
+        }
+        return Ok(map);
+    }).await?;
+    let user_cache = cache_info.remove(&CACHE_TYPE_USER);
+
+    let users = select_data(wanisql::SELECT_USER, conn, wanisql::parse_user, []).await?;
+
+    let mut load_user = users.len() == 0;
+    if !load_user {
+        load_user = match &user_cache {
+            Some(user_cache) => { 
+                match &user_cache.updated_after {
+                    Some(updated_after) => {
+                        match DateTime::parse_from_rfc3339(updated_after) {
+                            Ok(updated_after) => {
+                                let expiration = Utc::now() - chrono::Duration::days(7);
+                                updated_after.with_timezone(&Utc) < expiration
+                            },
+                            Err(_) => { 
+                                true
+                            }
+                        }
+                    },
+                    None => {
+                        true
+                    }
+                }
+            },
+            None => {
+                true
+            }
+        };
+    }
+    if !load_user {
+        if let Some(period_end) = users[0].data.subscription.period_ends_at {
+            if period_end < Utc::now() {
+                load_user = true;
+            }
+        }
+    }
+
+    let user = if !load_user { return Ok(users.into_iter().next().unwrap()) } 
+        else { load_user_from_wk(web_config, conn, rate_limit, &user_cache).await };
+    match user {
+        Ok(u) => Ok(u),
+        Err(e) => {
+            // Fall back to the local cache of users if we had an error
+            if users.len() > 0 {
+                Ok(users.into_iter().next().unwrap())
+            }
+            else {
+                Err(e)
+            }
+        },
+    }
+}
+
+async fn load_user_from_wk(web_config: &WaniWebConfig, conn: &AsyncConnection, rate_limit: &RateLimitBox, u_cache: &Option<CacheInfo>) -> Result<wanidata::User, WaniError> {
+    let headers = if let Some(u_cache) = u_cache { 
+        if let Some(etag) = &u_cache.etag {
+            Some(vec![(reqwest::header::IF_NONE_MATCH.to_string(), etag.to_owned())])
+        } else {
+            None
+        }
+    } else { None };
+    let info = RequestInfo::<()> {
+        url: "https://api.wanikani.com/v2/user",
+        method: RequestMethod::Get,
+        headers,
+        ..Default::default()
+    };
+
+    match send_throttled_request(info, rate_limit.clone(), web_config.clone()).await {
+        Ok((wani_resp, headers)) => {
+            match wani_resp.data {
+                WaniData::User(user) => {
+                    let last_request_time = Utc::now();
+                    let etag = headers.get(reqwest::header::ETAG);
+                    let user_copy = user.clone();
+                    let res = conn.call(move |conn| {
+                        let res = wanisql::store_user(&user_copy, conn);
+                        match res {
+                            Err(e) => {
+                                Err(tokio_rusqlite::Error::Other(Box::new(e)))
+                            },
+                            Ok(c) => Ok(c),
+                        }
+                    }).await;
+                    if let Err(e) = res {
+                        println!("Error saving user: {}", e);
+                    }
+
+                    let res = update_cache(None, CACHE_TYPE_USER, last_request_time, etag, conn).await;
+                    if let Err(e) = res {
+                        println!("Error updating user cache: {}", e);
+                    }
+
+                    return Ok(user)
+                },
+                _ => { 
+                    return Err(WaniError::Generic("Unexpected response when fetching User info.".into()))
+                },
+            }
+        },
+        Err(e) => {
+            return Err(e);
+        },
+    }
+}
+
 async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cache: bool) {
     async fn sync_subjects(conn: &AsyncConnection, 
-                           web_config: &WaniWebConfig, subjects_cache: CacheInfo, rate_limit: &RateLimitBox) -> Result<SyncResult, WaniError> {
+                           web_config: &WaniWebConfig, subjects_cache: CacheInfo, rate_limit: &RateLimitBox, is_user_restricted: bool) -> Result<SyncResult, WaniError> {
         let mut next_url: Option<String> = Some("https://api.wanikani.com/v2/subjects".into());
         let mut total_parse_fails = 0;
         let mut updated_resources = 0;
         let mut headers: Option<reqwest::header::HeaderMap> = None;
         let mut last_request_time = Utc::now();
         while let Some(url) = next_url {
+            let mut query: Vec<(&str, &str)> = vec![];
+            if let Some(after) = &subjects_cache.updated_after {
+                query.push(("updated_after", after));
+            }
+            if is_user_restricted {
+                query.push(("levels", "1,2,3"));
+            }
             let info = RequestInfo::<()> {
                 url: &url,
                 method: RequestMethod::Get,
-                query: if let Some(after) = &subjects_cache.updated_after {
-                    Some(vec![("updated_after", after)])
-                } else { None },
+                query: if query.len() > 0 { Some(query) } else { None },
                 headers: if let Some(tag) = &subjects_cache.last_modified {
                     Some(vec![(reqwest::header::LAST_MODIFIED.to_string(), tag.to_owned())])
                 } else { None },
@@ -2320,10 +2516,10 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
         if let Some(h) = headers {
             if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED) {
                 if let Ok(t) = tag.to_str() {
-                    update_cache(Some(t), CACHE_TYPE_SUBJECTS, last_request_time, &conn).await?;
+                    update_cache(Some(t), CACHE_TYPE_SUBJECTS, last_request_time, None, &conn).await?;
                 }
                 else {
-                    update_cache(None, CACHE_TYPE_SUBJECTS, last_request_time, &conn).await?;
+                    update_cache(None, CACHE_TYPE_SUBJECTS, last_request_time, None, &conn).await?;
                 }
             }
         }
@@ -2342,10 +2538,11 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
     let mut c_infos = c_infos.unwrap();
 
     let rate_limit = Arc::new(Mutex::new(None));
+    let is_user_restricted = is_user_restricted(web_config, conn, &rate_limit).await;
     println!("Syncing subjects. . .");
-    let subj_future = sync_subjects(&conn, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()}), &rate_limit);
+    let subj_future = sync_subjects(&conn, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()}), &rate_limit, is_user_restricted);
     println!("Syncing assignments. . .");
-    let ass_future = sync_assignments(&conn, &web_config, c_infos.remove(&CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo { id: CACHE_TYPE_ASSIGNMENTS, ..Default::default()}), &rate_limit);
+    let ass_future = sync_assignments(&conn, &web_config, c_infos.remove(&CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo { id: CACHE_TYPE_ASSIGNMENTS, ..Default::default()}), &rate_limit, is_user_restricted);
     let res = join![subj_future, ass_future];
 
     match res.0 {
@@ -2366,11 +2563,18 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
     };
 }
 
-async fn update_cache(last_modified: Option<&str>, cache_type: usize, last_request_time: DateTime<Utc>, conn: &AsyncConnection) -> Result<(), tokio_rusqlite::Error> {
+async fn update_cache(last_modified: Option<&str>, cache_type: usize, last_request_time: DateTime<Utc>, etag: Option<&HeaderValue>, conn: &AsyncConnection) -> Result<(), tokio_rusqlite::Error> {
     let last_modified = if let Some(lm) = last_modified { Some(lm.to_owned()) } else { None };
     let last_request_time = last_request_time.to_rfc3339();
+    let etag = if let Some(etag) = etag { 
+        if let Ok(etag) = etag.to_str() {
+            Some(etag.to_owned())
+        }
+        else { None }
+    } else { None };
+
     return conn.call(move |c| {
-        c.execute("update cache_info set last_modified = ?1, updated_after = ?2, etag = ?3 where id = ?4;", params![last_modified, &last_request_time, Option::<String>::None, cache_type])?;
+        c.execute("replace into cache_info (last_modified, updated_after, etag, id) values (?1, ?2, ?3, ?4);", params![last_modified, &last_request_time, etag, cache_type])?;
         Ok(())
     }).await;
 }
@@ -2392,6 +2596,7 @@ fn command_init(p_config: &ProgramConfig) {
 
 const CACHE_TYPE_SUBJECTS: usize = 0;
 const CACHE_TYPE_ASSIGNMENTS: usize = 1;
+const CACHE_TYPE_USER: usize = 2;
 
 fn setup_db(c: &Connection) -> Result<(), SqlError> {
     // Arrays of non-id'ed objects will be stored as json
@@ -2406,10 +2611,11 @@ fn setup_db(c: &Connection) -> Result<(), SqlError> {
             updated_after text
         )", [])?;
 
-    c.execute("insert or ignore into cache_info (id) values (?1),(?2)", 
+    c.execute("insert or ignore into cache_info (id) values (?1),(?2),(?3)", 
               params![
                 CACHE_TYPE_SUBJECTS, 
                 CACHE_TYPE_ASSIGNMENTS, 
+                CACHE_TYPE_USER, 
               ])?;
 
     //c.execute("drop table new_reviews;", [])?;
@@ -2420,6 +2626,7 @@ fn setup_db(c: &Connection) -> Result<(), SqlError> {
     c.execute(wanisql::CREATE_KANA_VOCAB_TBL, [])?;
     c.execute(wanisql::CREATE_ASSIGNMENTS_TBL, [])?;
     c.execute(wanisql::CREATE_ASSIGNMENTS_INDEX, [])?;
+    c.execute(wanisql::CREATE_USER_TBL, [])?;
     Ok(())
 }
 async fn command_test_throttle(args: &Args) {
