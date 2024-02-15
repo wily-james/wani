@@ -70,13 +70,14 @@ Do your reviews:
 ```
 wani r
 ```
-You can view the review or lesson help by typing '?' during a lesson or review session.  
-You can quit a review session at any time (with ctrl+c), and your progress will be saved locally and/or uploaded to WaniKani servers.  
 
 Do your lessons:
 ```
 wani l
 ```
+
+You can view the review or lesson help by typing '?' during a lesson or review session.  
+You can quit a review session at any time (with ctrl+c), and your progress will be saved locally and/or uploaded to WaniKani servers.  
 
 ## HOTKEYS
 
