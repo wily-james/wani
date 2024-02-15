@@ -59,12 +59,13 @@ First-time setup and download subjects:
 wani sync
 ```
 
-Do your reviews
+Do your reviews:
 ```
 wani r
 ```
+You can quit a review session at any time (with ctrl+c), and your progress will be saved locally and/or uploaded to WaniKani servers.  
 
-Do your lessons
+Do your lessons:
 ```
 wani l
 ```
