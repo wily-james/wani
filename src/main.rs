@@ -338,11 +338,7 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
                 .bearer_auth(&web_config.auth);
 
             if let Some(updated_after) = &cache_info.updated_after {
-                println!("Using assignments updated after: {}", updated_after);
                 request = request.query(&[("updated_after", updated_after)]);
-            }
-            else {
-                println!("No assignments updated after");
             }
 
             last_request_time = Some(Utc::now());
@@ -402,7 +398,6 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
             }
         }
 
-        print!("finished ass sync");
         return Ok(SyncResult {
             success_count: ass_count,
             fail_count: ass_fail,
