@@ -1,3 +1,4 @@
+
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::Transaction;
 
@@ -119,7 +120,8 @@ pub(crate) const CREATE_ASSIGNMENTS_TBL: &str = "create table if not exists assi
             srs_stage integer not null,
             started_at text,
             subject_id integer not null,
-            subject_type integer not null
+            subject_type integer not null,
+            unlocked_at text
         )";
 
 pub(crate) const CREATE_ASSIGNMENTS_INDEX: &str = 
@@ -134,8 +136,20 @@ pub(crate) const INSERT_ASSIGNMENT: &str = "replace into assignments
                              srs_stage,
                              started_at,
                              subject_id,
-                             subject_type)
-                            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+                             subject_type,
+                             unlocked_at)
+                            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+
+pub(crate) const SELECT_LESSON_ASSIGNMENTS: &str = "select 
+                            id,
+                            available_at,
+                            created_at,
+                            hidden,
+                            srs_stage,
+                            started_at,
+                            subject_id,
+                            subject_type from assignments 
+                        where started_at is null and unlocked_at is not null;";
 
 pub(crate) const SELECT_AVAILABLE_ASSIGNMENTS: &str = "select 
                             id,
@@ -145,7 +159,8 @@ pub(crate) const SELECT_AVAILABLE_ASSIGNMENTS: &str = "select
                             srs_stage,
                             started_at,
                             subject_id,
-                            subject_type from assignments where available_at < ?1;";
+                            subject_type from assignments 
+                        where available_at < ?1;";// and started_at is not null;";
 
 pub(crate) fn parse_assignment(r: &rusqlite::Row<'_>) -> Result<wanidata::Assignment, WaniError> {
     return Ok(wanidata::Assignment {
@@ -194,6 +209,7 @@ pub(crate) fn store_assignment(r: wanidata::Assignment, stmt: &mut Transaction<'
         if let Some(started_at) = r.data.started_at { Some(started_at.to_rfc3339()) } else { None },
         r.data.subject_id,
         subj_type,
+        if let Some(unlocked_at) = r.data.unlocked_at { Some(unlocked_at.to_rfc3339()) } else { None },
         );
     return stmt.execute(INSERT_ASSIGNMENT, p);
 }

@@ -321,7 +321,6 @@ impl Radical {
             .filter(|m| m.primary && m.accepted_answer)
             .map(|m| &m.meaning)
     }
-
 }
 
 #[derive(Deserialize, Debug)]
@@ -865,60 +864,35 @@ fn edit_distance(s: &str, t: &str) -> usize {
     prev[m]
 }
 
-pub struct WaniFmtArgs<'a> {
-    pub radical_args: WaniTagArgs<'a>,
-    pub kanji_args: WaniTagArgs<'a>,
-    pub vocab_args: WaniTagArgs<'a>,
-    pub meaning_args: WaniTagArgs<'a>,
-    pub reading_args: WaniTagArgs<'a>,
-    pub ja_args: WaniTagArgs<'a>,
+#[derive(Default)]
+pub struct WaniFmtArgs {
+    pub radical_args: WaniTagArgs,
+    pub kanji_args: WaniTagArgs,
+    pub vocab_args: WaniTagArgs,
+    pub meaning_args: WaniTagArgs,
+    pub reading_args: WaniTagArgs,
+    pub ja_args: WaniTagArgs,
 }
 
-pub struct WaniTagArgs<'a> {
-    pub open_tag: &'a str,
-    pub close_tag: &'a str,
+#[derive(Default)]
+pub struct WaniTagArgs {
+    pub open_tag: String,
+    pub close_tag: String,
 }
-
-pub const EMPTY_ARGS: WaniFmtArgs = WaniFmtArgs {
-    radical_args: WaniTagArgs { 
-        open_tag: "",
-        close_tag: "",
-    },
-    kanji_args: WaniTagArgs { 
-        open_tag: "",
-        close_tag: "",
-    },
-    vocab_args: WaniTagArgs { 
-        open_tag: "",
-        close_tag: "",
-    },
-    meaning_args: WaniTagArgs { 
-        open_tag: "",
-        close_tag: "",
-    },
-    reading_args: WaniTagArgs { 
-        open_tag: "",
-        close_tag: "",
-    },
-    ja_args: WaniTagArgs { 
-        open_tag: "",
-        close_tag: "",
-    },
-};
 
 pub fn format_wani_text(s: &str, args: &WaniFmtArgs) -> String {
-    let s = s.replace("<radical>", args.radical_args.open_tag);
-    let s = s.replace("</radical>", args.radical_args.close_tag);
-    let s = s.replace("<kanji>", args.kanji_args.open_tag);
-    let s = s.replace("</kanji>", args.kanji_args.close_tag);
-    let s = s.replace("<vocabulary>", args.vocab_args.open_tag);
-    let s = s.replace("</vocabulary>", args.vocab_args.close_tag);
-    let s = s.replace("<reading>", args.reading_args.open_tag);
-    let s = s.replace("</reading>", args.reading_args.close_tag);
-    let s = s.replace("<ja>", args.ja_args.open_tag);
-    let s = s.replace("</ja>", args.ja_args.close_tag);
-    let s = s.replace("<meaning>", args.meaning_args.open_tag);
-    s.replace("</meaning>", args.meaning_args.close_tag)
+    let s = s.replace("<radical>", &args.radical_args.open_tag);
+    let s = s.replace("</radical>", &args.radical_args.close_tag);
+    let s = s.replace("<kanji>", &args.kanji_args.open_tag);
+    let s = s.replace("</kanji>", &args.kanji_args.close_tag);
+    let s = s.replace("<vocabulary>", &args.vocab_args.open_tag);
+    let s = s.replace("</vocabulary>", &args.vocab_args.close_tag);
+    let s = s.replace("<reading>", &args.reading_args.open_tag);
+    let s = s.replace("</reading>", &args.reading_args.close_tag);
+    let s = s.replace("<ja>", &args.ja_args.open_tag);
+    let s = s.replace("</ja>", &args.ja_args.close_tag);
+    let s = s.replace("<meaning>", &args.meaning_args.open_tag);
+    s.replace("</meaning>", &args.meaning_args.close_tag)
 }
 
 #[cfg(test)]
