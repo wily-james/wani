@@ -10,6 +10,15 @@
 ## DISCLAIMER
 This is an unofficial WaniKani client. Use at your own risk.
 
+<!--toc:start-->
+  - [INSTALL](#install)
+    - [From Source](#from-source)
+    - [Binaries](#binaries)
+  - [RECOMMENDED SETUP](#recommended-setup)
+  - [USE](#use)
+  - [CONFIGURATION](#configuration)
+<!--toc:end-->
+
 ## INSTALL
 
 ### From Source
@@ -21,6 +30,18 @@ cargo install --git https://github.com/wily-james/wani.git
 ### Binaries
 
 TODO
+
+## RECOMMENDED SETUP
+
+You'll need to provide your WaniKani personal [API token](https://www.wanikani.com/settings/personal_access_tokens).
+The easiest way to set this up is to create a config file at "~/.config/wani/.wani.conf".
+Add the following line to that file (replacing your_auth_token with your actual auth token).
+```
+auth: your_auth_token
+```
+
+For more information about the wani config file, see:
+  - [CONFIGURATION](#configuration)
 
 ## USE
 
