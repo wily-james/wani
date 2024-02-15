@@ -162,6 +162,7 @@ pub struct VocabData
     pub slug: String,
     pub spaced_repetition_system_id: i32,
 
+    pub characters: String,
     pub component_subject_ids: Vec<i32>,
     pub context_sentences: Vec<ContextSentence>,
     pub parts_of_speech: Vec<String>,
@@ -224,6 +225,7 @@ pub struct KanaVocabData {
     pub slug: String,
     pub spaced_repetition_system_id: i32,
 
+    pub characters: String,
     pub context_sentences: Vec<ContextSentence>,
     pub parts_of_speech: Vec<String>,
     pub pronunciation_audios: Vec<PronunciationAudio>,
@@ -273,4 +275,27 @@ pub enum AuxMeaningType
     Whitelist,
     #[serde(rename="blacklist")]
     Blacklist
+}
+
+#[derive(Deserialize, Debug)]
+pub enum CacheInfoType
+{
+    Resources = 0,
+}
+
+pub enum CacheInfoSchema
+{
+    Type,
+    Etag,
+    LastModified,
+}
+
+impl Into<usize> for CacheInfoSchema {
+    fn into(self) -> usize {
+        match self {
+            CacheInfoSchema::Type => 0,
+            CacheInfoSchema::Etag => 1,
+            CacheInfoSchema::LastModified => 2,
+        }
+    }
 }

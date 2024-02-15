@@ -1,17 +1,19 @@
 mod wanidata;
 
 use crate::wanidata::{
-    WaniData,
-    WaniResp
+    CacheInfoSchema, CacheInfoType, WaniData, WaniResp
 };
 use std::{fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use clap::{Parser, Subcommand};
 use chrono::Utc;
 use reqwest::{
-    blocking::Client, StatusCode
+    blocking::Client, header::HeaderMap, Response, StatusCode
     //Error,
 };
-use rusqlite::Connection;
+use rusqlite::{
+    Connection,
+    Error as SqlError,
+};
 
 #[derive(Parser)]
 struct Args {
@@ -43,6 +45,12 @@ enum Command {
     /// Does first-time initialization
     Init,
     TestSubject,
+    /// Syncs local data with WaniKani servers
+    Sync,
+    /// Forces update of local data instead of only fetching new data
+    ForceSync,
+    /// Check the cache info in db
+    CacheInfo,
 }
 
 struct ProgramConfig {
@@ -63,7 +71,10 @@ fn main() {
                 Command::Summary => wani_summary(&args),
                 Command::S => wani_summary(&args),
                 Command::Init => wani_init(&args),
-                Command::TestSubject => wani_test_subject(&args)
+                Command::TestSubject => wani_test_subject(&args),
+                Command::Sync => wani_sync(&args, false),
+                Command::ForceSync => wani_sync(&args, true),
+                Command::CacheInfo => check_cache_info(&args),
             }
         },
         None => wani_summary(&args),
@@ -110,14 +121,249 @@ fn setup_connection(args: &Args) -> Result<Connection, Error> {
     }
 }
 
+fn check_cache_info(args: &Args) {
+    let conn = setup_connection(&args);
+    match conn {
+        Err(e) => println!("{}", e.msg),
+        Ok(c) => {
+            match c.query_row("select * from cache_info where id = 0", [], 
+                        |r| Ok((r.get::<usize, i32>(0)?, r.get::<usize, Option<String>>(1)?, r.get::<usize, Option<String>>(2)?, r.get::<usize, Option<String>>(3)?))) {
+                Ok(t) => {
+                    println!("CacheInfo: Type {}, ETag {}, LastMod {}, UpdatedAfter {}", 
+                             t.0, 
+                             t.1.unwrap_or("None".into()), 
+                             t.2.unwrap_or("None".into()), 
+                             t.3.unwrap_or("None".into()));
+                },
+                Err(e) => {
+                    println!("Error checking cache_info: {}", e);
+                }
+            }
+            c.close().unwrap();
+        },
+    };
+}
+
+fn wani_sync(args: &Args, ignore_cache: bool) {
+    fn sync(args: &Args, conn: &Connection, ignore_cache: bool) {
+        let web_config = get_web_config(&args);
+        if let Err(e) = web_config {
+            println!("{}", e.msg);
+            return;
+        }
+
+        let mut etag: Option<String> = None;
+        let mut updated_after: Option<String> = None;
+        if !ignore_cache {
+            let res = conn.query_row("select i.etag, i.updated_after from cache_info i where id = 0;",
+                                     [],
+                                     |r| Ok((r.get::<usize, Option<String>>(0), r.get::<usize, Option<String>>(1))));
+            match res {
+                Ok(t) => {
+                    if let Ok(tag) = t.0 {
+                        etag = tag;
+                    }
+                    if let Ok(after) = t.1 {
+                        updated_after = after;
+                    }
+                },
+                Err(e) => {
+                    println!("Error fetching cache_info. Error: {}", e);
+                    return;
+                }
+            }
+        }
+
+        let web_config = web_config.unwrap();
+        let client = Client::new();
+        let mut request = client
+            .get("https://api.wanikani.com/v2/subjects")
+            .header("Wanikani-Revision", "20170710")
+            .bearer_auth(web_config.auth);
+
+        if let Some(tag) = etag {
+            request = request.header(reqwest::header::IF_NONE_MATCH, &tag);
+        }
+
+        if let Some(after) = updated_after {
+            request = request.query(&[("updated_after", &after)]);
+        }
+
+        let request_time = Utc::now();
+        match parse_response(request.send()) {
+            Ok(t) => {
+                let wr = t.0;
+                let headers = t.1;
+
+                match wr.data {
+                    WaniData::Collection(c) => {
+                        if let Some(tag) = headers.get(reqwest::header::ETAG)
+                        {
+                            if let Ok(t) = tag.to_str() {
+                                conn
+                                    .execute("update cache_info set etag = ?1, updated_after = ?2 where id = ?3;", [t, &request_time.to_rfc3339(), "0"])
+                                    .unwrap();
+                            }
+                        }
+
+                        for wd in &c.data {
+                            match wd {
+                                WaniData::Radical(r) => {
+                                },
+                                WaniData::Kanji(k) => {
+                                },
+                                WaniData::Vocabulary(v) => {
+                                },
+                                WaniData::KanaVocabulary(kv) => {
+                                },
+                                _ => {},
+                            }
+                        }
+                        println!("Updated Resources: {}", c.data.len());
+                    },
+                    _ => {
+                        println!("Unexpected data returned while updating resources cache: {:?}", wr.data)
+                    },
+                }
+            }
+
+            Err(s) => println!("{}", s),
+        }
+    }
+
+    let conn = setup_connection(&args);
+    match conn {
+        Err(e) => println!("{}", e.msg),
+        Ok(c) => {
+            sync(&args, &c, ignore_cache);
+            c.close().unwrap();
+        },
+    };
+}
+
 fn wani_init(args: &Args) {
     let conn = setup_connection(&args);
     match conn {
         Err(e) => println!("{}", e.msg),
         Ok(c) => {
-
+            match setup_db(c) {
+                Ok(_) => {},
+                Err(e) => {
+                    println!("Error setting up SQLite DB: {}", e.to_string())
+                },
+            }
         },
     };
+}
+
+fn setup_db(c: Connection) -> Result<(), SqlError> {
+    // Arrays of non-id'ed objects will be stored as json
+    // Arrays of ints will be stored as json "[1,2,3]"
+    
+    // CacheInfo
+    c.execute(
+        "create table if not exists cache_info (
+            id integer primary key,
+            etag text,
+            last_modified text,
+            updated_after text
+        )", [])?;
+
+    c.execute("insert into cache_info (id) values (0)", [])?;
+
+    // Radicals
+    c.execute(
+        "create table if not exists radicals (
+            id integer primary key,
+            data_updated_at text not null,
+            aux_meanings text not null,
+            created_at text not null, 
+            document_url text not null,
+            hidden_at text,
+            lesson_position integer not null,
+            level integer not null,
+            meaning_mnemonic text not null,
+            meanings text not null,
+            slug text not null,
+            srs_id integer not null,
+            amalgamation_subject_ids text not null,
+            characters text
+        )", [])?;
+    
+    // Kanji
+    c.execute(
+        "create table if not exists kanji (
+            id integer primary key,
+            data_updated_at text not null,
+            aux_meanings text not null,
+            created_at text not null, 
+            document_url text not null,
+            hidden_at text,
+            lesson_position integer not null,
+            level integer not null,
+            meaning_mnemonic text not null,
+            meanings text not null,
+            slug text not null,
+            srs_id integer not null,
+            characters text not null,
+            amalgamation_subject_ids text not null,
+            component_subject_ids text not null,
+            meaning_hint text,
+            reading_hint text,
+            reading_mnemonic text not null,
+            readings text not null,
+            visually_similar_subject_ids text
+        )", [])?;
+    
+    // Vocab
+    c.execute(
+        "create table if not exists vocab (
+            id integer primary key,
+            data_updated_at text not null,
+            aux_meanings text not null,
+            created_at text not null, 
+            document_url text not null,
+            hidden_at text,
+            lesson_position integer not null,
+            level integer not null,
+            meaning_mnemonic text not null,
+            meanings text not null,
+            slug text not null,
+            srs_id integer not null,
+            characters text not null,
+            component_subject_ids text not null,
+            context_sentences text not null,
+            parts_of_speech text not null,
+            pronunciation_audio_ids text not null,
+            readings text not null,
+            reading_mnemonic text not null
+        )", [])?;
+    
+    // KanaVocab
+    c.execute(
+        "create table if not exists kana_vocab (
+            id integer primary key,
+            data_updated_at text not null,
+            aux_meanings text not null,
+            created_at text not null, 
+            document_url text not null,
+            hidden_at text,
+            lesson_position integer not null,
+            level integer not null,
+            meaning_mnemonic text not null,
+            meanings text not null,
+            slug text not null,
+            srs_id integer not null,
+            characters text not null,
+            context_sentences text not null,
+            parts_of_speech text not null,
+            pronunciation_audio_ids text not null
+        )", [])?;
+
+    match c.close() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.1),
+    }
 }
 
 fn wani_test_subject(args: &Args) {
@@ -136,30 +382,45 @@ fn wani_test_subject(args: &Args) {
         .bearer_auth(web_config.auth)
         .send();
 
+    match parse_response(response) {
+        Ok(t) => handle_wani_resp(t.0),
+        Err(s) => println!("{}", s),
+    }
+}
+
+fn parse_response(response: Result<reqwest::blocking::Response, reqwest::Error>) -> Result<(WaniResp, reqwest::header::HeaderMap), String> {
     match response {
         Err(s) => {
-            println!("Error with request: {}", s)
+            Err(format!("Error with request: {}", s))
         },
 
         Ok(r) => {
             match r.status() {
                 StatusCode::OK => {
+                    let headers = r.headers().to_owned();
                     let wani = r.json::<WaniResp>();
                     match wani {
-                        Err(s) => println!("Error parsing HTTP 200 response: {}", s),
+                        Err(s) => Err(format!("Error parsing HTTP 200 response: {}", s)),
                         Ok(w) => {
-                            handle_wani_resp(w);
+                            Ok((w, headers))
                         },
                     }
                 },
+                StatusCode::NOT_MODIFIED => {
+                    Ok((WaniResp {
+                        url: r.url().to_string(),
+                        data_updated_at: None,
+                        data: WaniData::Collection(wanidata::Collection { data: vec![] }),
+                    }, r.headers().to_owned()))
+                },
                 StatusCode::UNAUTHORIZED => {
-                    println!("HTTP 401: Unauthorized. Make sure your wanikani auth token is correct, and hasn't been expired.");
+                    Err(format!("HTTP 401: Unauthorized. Make sure your wanikani auth token is correct, and hasn't been expired."))
                 },
                 StatusCode::TOO_MANY_REQUESTS => {
-                    println!("Wanikani API rate limit exceeded.");
+                    Err(format!("Wanikani API rate limit exceeded."))
                 },
-                _ => { println!("HTTP status code {}", r.status()) },
-            };
+                _ => { Err(format!("HTTP status code {}", r.status())) },
+            }
         },
     }
 }
@@ -244,31 +505,9 @@ fn wani_summary(args: &Args) {
         .bearer_auth(web_config.auth)
         .send();
 
-    match response {
-        Err(s) => {
-            println!("Error with request: {}", s)
-        },
-
-        Ok(r) => {
-            match r.status() {
-                StatusCode::OK => {
-                    let wani = r.json::<WaniResp>();
-                    match wani {
-                        Err(s) => println!("Error parsing HTTP 200 response: {}", s),
-                        Ok(w) => {
-                            handle_wani_resp(w);
-                        },
-                    }
-                },
-                StatusCode::UNAUTHORIZED => {
-                    println!("HTTP 401: Unauthorized. Make sure your wanikani auth token is correct, and hasn't been expired.");
-                },
-                StatusCode::TOO_MANY_REQUESTS => {
-                    println!("Wanikani API rate limit exceeded.");
-                },
-                _ => { println!("HTTP status code {}", r.status()) },
-            };
-        },
+    match parse_response(response) {
+        Ok(wr) => handle_wani_resp(wr.0),
+        Err(s) => println!("{}", s),
     }
 }
 
