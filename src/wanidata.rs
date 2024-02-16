@@ -765,10 +765,10 @@ where T: Answer, U: Answer, V: Answer {
     if let AnswerResult::Incorrect = best {
         if guess.chars().any(|c| {
             if expect_numeric {
-                return !c.is_alphanumeric() && !c.is_kana();
+                return !c.is_alphanumeric() && !c.is_kana() && c != ' ';
             }
 
-            !c.is_alphabetic() && !c.is_kana()
+            !c.is_alphabetic() && !c.is_kana() && c != ' '
         }) {
             return AnswerResult::BadFormatting;
         }
@@ -1097,6 +1097,23 @@ mod tests {
     }
 
     #[test]
+    fn is_correct_answer_expects_number_rejects_spaces() {
+        let is_meaning = true;
+        let mut kanji = get_standard_kanji();
+        kanji.data.meanings.push(Meaning { 
+            meaning: "42".into(), 
+            primary: false, 
+            accepted_answer: true 
+        });
+
+        let subj = Subject::Kanji(kanji);
+        let guess = "hello there";
+        let result = is_correct_answer(&subj, &guess, is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    #[test]
     fn is_correct_answer_accepted_kanji_meaning() {
         let is_meaning = true;
         let kanji = get_standard_kanji();
@@ -1175,6 +1192,15 @@ mod tests {
         let is_meaning = true;
         let kanji = get_standard_kanji();
         let result = is_correct_answer(&Subject::Kanji(kanji), "foo", is_meaning, "");
+
+        assert!(matches!(result, AnswerResult::Incorrect));
+    }
+
+    #[test]
+    fn is_correct_answer_incorrect_kanji_meaning_with_spaces() {
+        let is_meaning = true;
+        let kanji = get_standard_kanji();
+        let result = is_correct_answer(&Subject::Kanji(kanji), "foo bar", is_meaning, "");
 
         assert!(matches!(result, AnswerResult::Incorrect));
     }
