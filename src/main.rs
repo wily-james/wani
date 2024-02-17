@@ -2618,6 +2618,7 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
 
     let mut assignments = vec![];
     let mut last_request_time: Option<DateTime<Utc>> = None;
+    let mut headers = None;
     while let Some(url) = next_url {
         next_url = None;
         let mut query: Vec<(&str, &str)> = vec![];
@@ -2632,12 +2633,16 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
             url,
             method: RequestMethod::Get,
             query: if query.len() > 0 { Some(query) } else { None }, 
+            headers: if let Some(tag) = &cache_info.last_modified {
+                Some(vec![(reqwest::header::LAST_MODIFIED.to_string(), tag.to_owned())])
+            } else { None },
             ..Default::default()
         };
 
         last_request_time = Some(Utc::now());
         match send_throttled_request(info, rate_limit.clone(), web_config.clone()).await {
             Ok(t) => {
+                headers = Some(t.1);
                 match t.0.data {
                     WaniData::Collection(c) => {
                         next_url = c.pages.next_url;
@@ -2683,7 +2688,16 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
                // problem inserting
 
     if let Some(time) = last_request_time {
-        match update_cache(None, CACHE_TYPE_ASSIGNMENTS, time, None, &conn).await {
+        let mut last_modified = None;
+        if let Some(h) = headers {
+            if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED) {
+                if let Ok(t) = tag.to_str() {
+                    last_modified = Some(t.to_owned());
+                }
+            }
+        }
+
+        match update_cache(last_modified, CACHE_TYPE_ASSIGNMENTS, time, None, &conn).await {
             Ok(_) => (),
             Err(e) => { 
                 println!("Failed to update assignment cache. Error: {}", e);
@@ -2966,7 +2980,7 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
         if let Some(h) = headers {
             if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED) {
                 if let Ok(t) = tag.to_str() {
-                    update_cache(Some(t), CACHE_TYPE_SUBJECTS, last_request_time, None, &conn).await?;
+                    update_cache(Some(t.to_owned()), CACHE_TYPE_SUBJECTS, last_request_time, None, &conn).await?;
                 }
                 else {
                     update_cache(None, CACHE_TYPE_SUBJECTS, last_request_time, None, &conn).await?;
@@ -3013,7 +3027,7 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
     };
 }
 
-async fn update_cache(last_modified: Option<&str>, cache_type: usize, last_request_time: DateTime<Utc>, etag: Option<&HeaderValue>, conn: &AsyncConnection) -> Result<(), tokio_rusqlite::Error> {
+async fn update_cache(last_modified: Option<String>, cache_type: usize, last_request_time: DateTime<Utc>, etag: Option<&HeaderValue>, conn: &AsyncConnection) -> Result<(), tokio_rusqlite::Error> {
     let last_modified = if let Some(lm) = last_modified { Some(lm.to_owned()) } else { None };
     let last_request_time = last_request_time.to_rfc3339();
     let etag = if let Some(etag) = etag { 
