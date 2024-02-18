@@ -292,23 +292,33 @@ fn play_audio(audio_path: &PathBuf) -> Result<(), WaniError> {
     }
 }
 
-fn print_lesson_screen(term: &Term, char_line: &[String], meaning_line: &Option<String>, rev_type: &ReviewType, width: usize) -> Result<(), WaniError> {
+async fn print_lesson_screen(term: &Term, meaning_line: &Option<String>, rev_type: &ReviewType, subject: &Subject, image_cache: &PathBuf, web_config: &WaniWebConfig) -> Result<(usize, usize, Vec<String>), WaniError> {
+    let width = term.size().1;
+    let radical_width = u32::from(width * 5 / 8);
+    let width = width.into();
+
     term.clear_screen()?;
     if let ReviewType::Lesson(subj_counts) = rev_type {
         print_lesson_status(subj_counts, term, width)?;
     }
-    for line in char_line {
+
+    let char_line = get_chars_for_subj(&subject, image_cache, radical_width, web_config).await?;
+    for line in &char_line {
         term.write_line(line)?;
     }
     if let Some(line) = meaning_line {
         term.write_line(line)?;
     }
 
-    Ok(())
+
+    Ok((width, width * 5 / 8, char_line))
 }
 
-fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, width: usize, align: console::Alignment, char_lines: &Vec<String>, review_type_text: &str, toast: &Option<&str>, input: &str) -> Result<(), WaniError> {
+async fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, align: console::Alignment, subject: &Subject, review_type_text: &str, toast: &Option<&str>, image_cache: &PathBuf, web_config: &WaniWebConfig, input: &str) -> Result<(usize, usize, Vec<String>), WaniError> {
     term.clear_screen()?;
+    let (_, width) = term.size();
+    let radical_width = u32::from(width * 5 / 8);
+    let width: usize = usize::from(width);
 
     // Top line changes based on review type
     match rev_type {
@@ -326,7 +336,8 @@ fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, width: usize,
         },
     }
 
-    for char_line in char_lines {
+    let char_lines = get_chars_for_subj(&subject, image_cache, radical_width, web_config).await?;
+    for char_line in &char_lines {
         term.write_line(char_line)?;
     }
     term.write_line(pad_str(&format!("{}:", review_type_text), width, align, None).deref())?;
@@ -335,7 +346,10 @@ fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, width: usize,
         term.write_line(pad_str(&format!("{} {}", "-", t), width, align, None).deref())?;
     }
 
-    Ok(())
+    let input_width = console::measure_text_width(&input);
+    term.move_cursor_to(width / 2 + input.chars().count() / 2, 2 + input_width)?;
+
+    Ok((width, width * 5 / 8, char_lines))
 }
 
 fn print_lesson_status(subj_counts: &SubjectCounts, term: &Term, width: usize) -> Result<(), WaniError> {
@@ -726,7 +740,8 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
     Ok(())
 }
 
-fn show_lesson_help(term: &Term, width: usize, align: console::Alignment) {
+fn show_lesson_help(term: &Term, align: console::Alignment) {
+    let width = term.size().1.into();
     let _ = term.clear_screen();
     let _ = term.write_line(pad_str("Hotkeys", width, align, None).deref());
     let _ = term.write_line(pad_str("?: Show hotkeys menu", width, align, None).deref());
@@ -740,7 +755,8 @@ fn show_lesson_help(term: &Term, width: usize, align: console::Alignment) {
     let _ = term.read_key();
 }
 
-fn show_review_help(term: &Term, width: usize, align: console::Alignment) {
+fn show_review_help(term: &Term, align: console::Alignment) {
+    let width = term.size().1.into();
     let _ = term.clear_screen();
     let _ = term.write_line(pad_str("Hotkeys", width, align, None).deref());
     let _ = term.write_line(pad_str("?: Show hotkeys menu", width, align, None).deref());
@@ -757,9 +773,6 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
     }
 
     let term = Term::buffered_stdout();
-    let width = 80;
-    let text_width = 50;
-    let radical_width = 50;
     let align = console::Alignment::Center;
     let wfmt_args = get_wfmt_args(&term);
 
@@ -771,19 +784,12 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
 
         let assignment = &batch[index];
         let subject = subjects.get(&assignment.data.subject_id).unwrap();
-        let characters = get_chars_for_subj(&subject, image_cache, radical_width, web_config).await;
+        let characters = get_chars_for_subj(&subject, image_cache, 100, web_config).await;
         if let Err(_) = characters {
             index += 1;
             continue 'flashcards;
         }
-        let characters = characters.unwrap();
 
-        let padded_chars = characters.iter().map(|l| pad_str(l, width, align, None));
-        let char_line = padded_chars.map(|pc| match subject {
-            Subject::Radical(_) => style(pc).white().on_blue().to_string(),
-            Subject::Kanji(_) => style(pc).white().on_red().to_string(),
-            _ => style(pc).white().on_magenta().to_string(),
-        }).collect_vec();
         let primary_meaning = match subject {
             Subject::Radical(r) => r.primary_meanings().next(),
             Subject::Kanji(k) => k.primary_meanings().next(),
@@ -791,7 +797,7 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
             Subject::KanaVocab(kv) => kv.primary_meanings().next(),
         };
         let meaning_line = if let Some(meaning) = primary_meaning {
-            let padded_meaning = pad_str(meaning, width, align, None);
+            let padded_meaning = pad_str(meaning, term.size().1.into(), align, None);
             Some(match subject {
                 Subject::Radical(_) => style(padded_meaning).white().on_blue().to_string(),
                 Subject::Kanji(_) => style(padded_meaning).white().on_red().to_string(),
@@ -801,7 +807,7 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
 
         let mut card_page = 0;
         'card: loop {
-            print_lesson_screen(&term, &char_line, &meaning_line, subj_counts, width)?;
+            let (width, text_width, _) = print_lesson_screen(&term, &meaning_line, subj_counts, &subject, image_cache, web_config).await?;
             let lines = get_lesson_info_lines(subject, card_page, &wfmt_args, text_width, conn, align, width).await;
             if let None = lines {
                 index += 1;
@@ -824,7 +830,7 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
                 },
                 console::Key::Char(c) => {
                     match c {
-                        '?' => show_lesson_help(&term, width, align),
+                        '?' => show_lesson_help(&term, align),
                         'q' | 'Q' => break 'flashcards,
                         'g' | 'G' => { 
                             index += 1;
@@ -895,9 +901,6 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
     }
     let term = Term::buffered_stdout();
     let rng = &mut thread_rng();
-    let width = 80;
-    let text_width = 50;
-    let radical_width = 50;
     let align = console::Alignment::Center;
     let correct_msg = if p_config.colorblind { Some("Correct") } else { None };
     let incorrect_msg = if p_config.colorblind { Some("Inorrect") } else { None };
@@ -926,12 +929,11 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
             break 'subject;
         }
         let subject = subject.unwrap();
-        let characters = get_chars_for_subj(subject, image_cache, radical_width, web_config).await;
+        let characters = get_chars_for_subj(subject, image_cache, 100, web_config).await;
         if let Err(_) = characters {
             batch.pop();
             continue 'subject;
         }
-        let characters = characters.unwrap();
 
         let is_meaning = match subject {
             Subject::Radical(_) => true,
@@ -959,20 +961,14 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
             Subject::Vocab(_) => if is_meaning { "Vocab Meaning" } else { "Vocab Reading" },
             Subject::KanaVocab(_) => "Vocab Meaning",
         };
-        let padded_chars = characters.iter().map(|l| pad_str(l, width, align, None));
-        let char_line = padded_chars.map(|pc| match subject {
-            Subject::Radical(_) => style(pc).white().on_blue().to_string(),
-            Subject::Kanji(_) => style(pc).white().on_red().to_string(),
-            _ => style(pc).white().on_magenta().to_string(),
-        }).collect_vec();
 
         let mut toast = None;
-        print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, "")?;
-        term.move_cursor_to(width / 2, 2 + characters.len())?;
-        term.flush()?;
 
         'input: loop {
             input.clear();
+            print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, "").await?;
+            term.flush()?;
+
             let mut vis_input = &input;
             let mut kana_input = String::new();
 
@@ -991,7 +987,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                         }
                         else {
                             match c {
-                                '?' => show_review_help(&term, width, align),
+                                '?' => show_review_help(&term, align),
                                 _ => input.push(c),
                             }
                         }
@@ -1004,10 +1000,8 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                     ..Default::default()
                 });
                 vis_input = if is_meaning { &input } else { &kana_input };
-                let input_padded = pad_str(&vis_input, width, align, None);
-                print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, &input_padded)?;
-                let input_width = console::measure_text_width(&vis_input);
-                term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
+                let input_padded = pad_str(&vis_input, term.size().1.into(), align, None);
+                print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &input_padded).await?;
                 term.flush()?;
             }
 
@@ -1100,7 +1094,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                 }
             }
 
-            let input_line = pad_str(&vis_input, width, align, None);
+            let input_line = pad_str(&vis_input, term.size().1.into(), align, None);
             let input_formatted = match tuple.2 {
                 AnswerColor::Red => {
                     style(input_line.deref()).white().on_red().to_string()
@@ -1113,9 +1107,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                 },
             };
 
-            print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
-            let input_width = console::measure_text_width(&vis_input);
-            term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
+            print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &input_formatted).await?;
             term.flush()?;
 
             enum InfoStatus {
@@ -1129,7 +1121,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                     console::Key::Char(c) => {
                         match c {
                             '?' => if !tuple.0 {
-                                show_review_help(&term, width, align)
+                                show_review_help(&term, align)
                             },
                             'f' | 'F' => {
                                 if !tuple.0 { // Don't show info if the user isn't finished
@@ -1191,7 +1183,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                     _ => {},
                 }
 
-                print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, &input_formatted)?;
+                let (width, text_width, char_line) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &input_formatted).await?;
                 if let InfoStatus::Open(info_status) = info_status {
                     let lines = get_info_lines(&subject, info_status, width, text_width, align, &wfmt_args, is_meaning, connection).await;
                     for line in &lines {
@@ -1209,7 +1201,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
             }
 
             toast = None;
-            print_review_screen(&term, rev_type, width, align, &char_line, review_type_text, &toast, &"")?;
+            let (width, _, char_line) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &"").await?;
             let input_width = 0;
             term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
             term.flush()?;
