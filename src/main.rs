@@ -165,6 +165,12 @@ impl Display for WaniError {
     }
 }
 
+enum AnswerColor {
+    Green,
+    Red,
+    Gray
+}
+
 struct SyncResult {
     success_count: usize,
     fail_count: usize,
@@ -303,18 +309,24 @@ async fn print_lesson_screen(term: &Term, meaning_line: &Option<String>, rev_typ
     }
 
     let char_line = get_chars_for_subj(&subject, image_cache, radical_width, web_config).await?;
-    for line in &char_line {
+    let char_lines = get_chars_for_subj(&subject, image_cache, radical_width, web_config).await?;
+    let padded_chars = char_lines.iter().map(|l| pad_str(l, width, console::Alignment::Center, None));
+    let char_lines = padded_chars.map(|pc| match subject {
+        Subject::Radical(_) => style(pc).white().on_blue().to_string(),
+        Subject::Kanji(_) => style(pc).white().on_red().to_string(),
+        _ => style(pc).white().on_magenta().to_string(),
+    }).collect_vec();
+    for line in &char_lines {
         term.write_line(line)?;
     }
     if let Some(line) = meaning_line {
         term.write_line(line)?;
     }
 
-
     Ok((width, width * 5 / 8, char_line))
 }
 
-async fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, align: console::Alignment, subject: &Subject, review_type_text: &str, toast: &Option<&str>, image_cache: &PathBuf, web_config: &WaniWebConfig, input: &str) -> Result<(usize, usize, Vec<String>), WaniError> {
+async fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, align: console::Alignment, subject: &Subject, review_type_text: &str, toast: &Option<&str>, image_cache: &PathBuf, web_config: &WaniWebConfig, input: &str, color: Option<&AnswerColor>) -> Result<(usize, usize, Vec<String>), WaniError> {
     term.clear_screen()?;
     let (_, width) = term.size();
     let radical_width = u32::from(width * 5 / 8);
@@ -337,17 +349,34 @@ async fn print_review_screen<'a>(term: &Term, rev_type: &mut ReviewType, align: 
     }
 
     let char_lines = get_chars_for_subj(&subject, image_cache, radical_width, web_config).await?;
+    let padded_chars = char_lines.iter().map(|l| pad_str(l, width, align, None));
+    let char_lines = padded_chars.map(|pc| match subject {
+        Subject::Radical(_) => style(pc).white().on_blue().to_string(),
+        Subject::Kanji(_) => style(pc).white().on_red().to_string(),
+        _ => style(pc).white().on_magenta().to_string(),
+    }).collect_vec();
     for char_line in &char_lines {
         term.write_line(char_line)?;
     }
     term.write_line(pad_str(&format!("{}:", review_type_text), width, align, None).deref())?;
-    term.write_line(input)?;
+
+    let input_line = pad_str(&input, width, align, None);
+    let input_formatted = if let Some(color) = color { match color {
+        AnswerColor::Red => {
+            style(input_line.deref()).white().on_red().to_string()
+        },
+        AnswerColor::Green => {
+            style(input_line.deref()).white().on_green().to_string()
+        },
+        AnswerColor::Gray => {
+            style(input_line.deref()).white().on_color256(238).to_string()
+        },
+    } } else { input_line.to_string() };
+
+    term.write_line(&input_formatted)?;
     if let Some(t) = toast {
         term.write_line(pad_str(&format!("{} {}", "-", t), width, align, None).deref())?;
     }
-
-    let input_width = console::measure_text_width(&input);
-    term.move_cursor_to(width / 2 + input.chars().count() / 2, 2 + input_width)?;
 
     Ok((width, width * 5 / 8, char_lines))
 }
@@ -894,11 +923,6 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
 }
 
 async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, reviews: &mut HashMap<i32, NewReview>, batch: &mut Vec<Assignment>, rev_type: &mut ReviewType, audio_tx: &Sender<AudioMessage>, connection: &AsyncConnection) -> Result<(), WaniError> {
-    enum AnswerColor {
-        Green,
-        Red,
-        Gray
-    }
     let term = Term::buffered_stdout();
     let rng = &mut thread_rng();
     let align = console::Alignment::Center;
@@ -966,7 +990,8 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
 
         'input: loop {
             input.clear();
-            print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, "").await?;
+            let (width, _, char_lines) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, "", None).await?;
+            term.move_cursor_to(width / 2, 2 + char_lines.len())?;
             term.flush()?;
 
             let mut vis_input = &input;
@@ -1000,8 +1025,9 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                     ..Default::default()
                 });
                 vis_input = if is_meaning { &input } else { &kana_input };
-                let input_padded = pad_str(&vis_input, term.size().1.into(), align, None);
-                print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &input_padded).await?;
+                let (width, _, char_lines) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &vis_input, None).await?;
+                let input_width = console::measure_text_width(&vis_input);
+                term.move_cursor_to(width / 2 + vis_input.chars().count() / 2, 2 + char_lines.len())?;
                 term.flush()?;
             }
 
@@ -1094,20 +1120,9 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                 }
             }
 
-            let input_line = pad_str(&vis_input, term.size().1.into(), align, None);
-            let input_formatted = match tuple.2 {
-                AnswerColor::Red => {
-                    style(input_line.deref()).white().on_red().to_string()
-                },
-                AnswerColor::Green => {
-                    style(input_line.deref()).white().on_green().to_string()
-                },
-                AnswerColor::Gray => {
-                    style(input_line.deref()).white().on_color256(238).to_string()
-                },
-            };
-
-            print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &input_formatted).await?;
+            let (width, _, char_lines) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &vis_input, Some(&tuple.2)).await?;
+            let input_width = console::measure_text_width(&vis_input);
+            term.move_cursor_to(width / 2 + vis_input.chars().count() / 2, 2 + char_lines.len())?;
             term.flush()?;
 
             enum InfoStatus {
@@ -1183,16 +1198,17 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                     _ => {},
                 }
 
-                let (width, text_width, char_line) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &input_formatted).await?;
+                let (width, text_width, char_line) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &vis_input, Some(&tuple.2)).await?;
                 if let InfoStatus::Open(info_status) = info_status {
-                    let lines = get_info_lines(&subject, info_status, width, text_width, align, &wfmt_args, is_meaning, connection).await;
+                    let lines = get_info_lines(&subject, info_status, &wfmt_args, is_meaning, connection, text_width, width).await;
                     for line in &lines {
                         term.write_line(&pad_str(line, width, align, None))?;
                     }
 
                 }
 
-                term.move_cursor_to(width / 2 + input.len() / 2, 2 + char_line.len())?;
+                let input_width = console::measure_text_width(&vis_input);
+                term.move_cursor_to(width / 2 + vis_input.chars().count() / 2, 2 + char_lines.len())?;
                 term.flush()?;
             }
 
@@ -1201,9 +1217,8 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
             }
 
             toast = None;
-            let (width, _, char_line) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &"").await?;
-            let input_width = 0;
-            term.move_cursor_to(width / 2 + input_width / 2, 2 + char_line.len())?;
+            let (width, _, char_line) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &"", None).await?;
+            term.move_cursor_to(width / 2, 2 + char_line.len())?;
             term.flush()?;
         }
     }
@@ -1622,13 +1637,13 @@ async fn get_subjects_for_assignments(assignments: &[Assignment], c: &AsyncConne
     Ok(subjects_by_id)
 }
 
-async fn list_vocab_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str, width: usize, align: console::Alignment) -> Vec<String> {
+async fn list_vocab_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str) -> Vec<String> {
     let mut lines = vec![];
     match lookup_vocab(conn, ids).await {
         Ok(vocab) => {
             let mut i = 0;
             let vocab_in_line = 6;
-            lines.push(pad_str(label, width, align, None).to_string());
+            lines.push(label.to_owned());
             while i < vocab.len() {
                 let mut j = 0;
                 let mut vocab_line = vec![];
@@ -1637,7 +1652,7 @@ async fn list_vocab_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str,
                     i += 1;
                     j += 1;
                 }
-                lines.push(pad_str(&vocab_line.iter().join(", "), width, align, None).to_string())
+                lines.push(vocab_line.iter().join(", "));
             }
         },
         Err(e) => { 
@@ -1647,13 +1662,13 @@ async fn list_vocab_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str,
     lines
 }
 
-async fn list_radicals_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str, width: usize, align: console::Alignment) -> Vec<String> {
+async fn list_radicals_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str) -> Vec<String> {
     let mut lines = vec![];
     match lookup_radical(conn, ids).await {
         Ok(radicals) => {
             let mut i = 0;
             let radicals_in_line = 3;
-            lines.push(pad_str(label, width, align, None).to_string());
+            lines.push(label.to_owned());
             while i < radicals.len() {
                 let mut j = 0;
                 let mut radical_line = vec![];
@@ -1664,7 +1679,7 @@ async fn list_radicals_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &s
                     }
                     i += 1;
                 }
-                lines.push(pad_str(&radical_line.iter().join(", "), width, align, None).to_string())
+                lines.push(radical_line.iter().join(", "));
             }
         },
         Err(e) => { 
@@ -1675,13 +1690,13 @@ async fn list_radicals_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &s
 
 }
 
-async fn list_kanji_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str, width: usize, align: console::Alignment) -> Vec<String> {
+async fn list_kanji_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str) -> Vec<String> {
     let mut lines = vec![];
     match lookup_kanji(conn, ids).await {
         Ok(kanji) => {
             let mut i = 0;
             let kanji_in_line = 6;
-            lines.push(pad_str(label, width, align, None).to_string());
+            lines.push(label.to_owned());
             while i < kanji.len() {
                 let mut j = 0;
                 let mut kanji_line = vec![];
@@ -1690,7 +1705,7 @@ async fn list_kanji_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str,
                     i += 1;
                     j += 1;
                 }
-                lines.push(pad_str(&kanji_line.iter().join(", "), width, align, None).to_string())
+                lines.push(kanji_line.iter().join(", "));
             }
         },
         Err(e) => { 
@@ -1700,26 +1715,26 @@ async fn list_kanji_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &str,
     lines
 }
 
-fn get_context_sentences(sentences: &Vec<ContextSentence>, width: usize, text_width: usize) -> Vec<String> {
+fn get_context_sentences(sentences: &Vec<ContextSentence>, text_width: usize, width: usize) -> Vec<String> {
     let mut lines = vec![];
     let left = console::Alignment::Left;
-    lines.push(pad_str("Context Sentences:", width, left, None).to_string());
+    lines.push("Context Sentences:".to_owned());
     for sent in sentences {
         //lines.push(pad_str("English:", width, left, None).to_string());
         let mut sent_lines = vec![];
         split_str_by_len(&sent.ja, text_width, &mut sent_lines);
         for ele in &sent_lines {
             let mut line = String::from("\t");
-            line.push_str(&ele);
-            lines.push(pad_str(&line, width, left, None).to_string());
+            line.push_str(&pad_str(&ele, width, left, None).to_string());
+            lines.push(line);
         }
         sent_lines.clear();
         //lines.push(pad_str("日本語:", width, left, None).to_string());
         split_str_by_len(&sent.en, text_width, &mut sent_lines);
         for ele in sent_lines {
             let mut line = String::from("\t");
-            line.push_str(&ele);
-            lines.push(pad_str(&line, width, left, None).to_string());
+            line.push_str(&pad_str(&ele, width, left, None).to_string());
+            lines.push(line);
         }
         lines.push("".into());
     }
@@ -1743,7 +1758,7 @@ async fn get_lesson_info_lines(subject: &Subject, card_page: usize, wfmt_args: &
                 },
                 1 => {
                     let label = "Kanji Examples:";
-                    list_kanji_from_ids(conn, r.data.amalgamation_subject_ids.clone(), label, width, align).await
+                    list_kanji_from_ids(conn, r.data.amalgamation_subject_ids.clone(), label).await
                 },
                 _ => { vec![] },
             })
@@ -1756,18 +1771,18 @@ async fn get_lesson_info_lines(subject: &Subject, card_page: usize, wfmt_args: &
             Some(match card_page {
                 0 => {
                     let label = "Radical Composition:";
-                    list_radicals_from_ids(conn, k.data.component_subject_ids.clone(), label, width, align).await
+                    list_radicals_from_ids(conn, k.data.component_subject_ids.clone(), label).await
                 },
                 1 => {
-                    kanji_meaning_lines(k, width, align, text_width, wfmt_args)
+                    kanji_meaning_lines(k, text_width, wfmt_args)
                 },
                 2 => {
                     // TODO - list on'yomi vs kunyomi etc
-                    kanji_reading_lines(k, width, align, text_width, wfmt_args)
+                    kanji_reading_lines(k, text_width, wfmt_args)
                 },
                 3 => {
                     let label = "Vocabulary Examples:";
-                    list_vocab_from_ids(conn, k.data.amalgamation_subject_ids.clone(), label, width, align).await
+                    list_vocab_from_ids(conn, k.data.amalgamation_subject_ids.clone(), label).await
                 },
                 _ => { vec![] },
             })
@@ -1779,16 +1794,16 @@ async fn get_lesson_info_lines(subject: &Subject, card_page: usize, wfmt_args: &
             }
             Some(match card_page {
                 0 => {
-                    vocab_kanji_composition(v, width, align, conn, "Kanji Composition:").await
+                    vocab_kanji_composition(v, conn, "Kanji Composition:").await
                 },
                 1 => {
-                    vocab_meaning_lines(v, width, align, text_width, wfmt_args)
+                    vocab_meaning_lines(v, text_width, wfmt_args)
                 },
                 2 => {
-                    vocab_reading_lines(v, width, align, text_width, wfmt_args)
+                    vocab_reading_lines(v, text_width, wfmt_args)
                 },
                 3 => {
-                    get_context_sentences(&v.data.context_sentences, width, text_width)
+                    get_context_sentences(&v.data.context_sentences, text_width, width)
                 },
                 _ => { vec![] },
             })
@@ -1800,10 +1815,10 @@ async fn get_lesson_info_lines(subject: &Subject, card_page: usize, wfmt_args: &
             }
             Some(match card_page {
                 0 => {
-                    kana_vocab_meaning_lines(kv, width, align, text_width, wfmt_args)
+                    kana_vocab_meaning_lines(kv, text_width, wfmt_args)
                 },
                 1 => {
-                    get_context_sentences(&kv.data.context_sentences, width, text_width)
+                    get_context_sentences(&kv.data.context_sentences, text_width, width)
                 },
                 _ => { vec![] },
             })
@@ -1811,7 +1826,7 @@ async fn get_lesson_info_lines(subject: &Subject, card_page: usize, wfmt_args: &
     }
 }
 
-async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, text_width: usize, align: console::Alignment, wfmt_args: &WaniFmtArgs, is_meaning: bool, conn: &AsyncConnection) -> Vec<String> {
+async fn get_info_lines(subject: &Subject, info_status: usize, wfmt_args: &WaniFmtArgs, is_meaning: bool, conn: &AsyncConnection, text_width: usize, width: usize) -> Vec<String> {
     match subject {
         // 0 - radical name, mnemonic, user synonyms, user note
         // 1 - found in kanji
@@ -1822,10 +1837,10 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
                     let meanings = r.primary_meanings()
                         .join(", ");
                     if meanings.len() > 0 {
-                        lines.push(pad_str(&meanings, width, align, None).to_string());
+                        lines.push(meanings);
                     }
                     else {
-                        lines.push(pad_str("Radical name not found.", width, align, None).to_string())
+                        lines.push("Radical name not found".to_owned())
                     }
                     let mnemonic = wanidata::format_wani_text(&r.data.meaning_mnemonic, wfmt_args);
                     lines.push("---".to_owned());
@@ -1834,7 +1849,7 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
                 },
                 1 => {
                     let label = "Found in Kanji:";
-                    list_kanji_from_ids(conn, r.data.amalgamation_subject_ids.clone(), label, width, align).await
+                    list_kanji_from_ids(conn, r.data.amalgamation_subject_ids.clone(), label).await
                 },
                 _ => { vec![] }
             }
@@ -1861,22 +1876,22 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
             };
             match info_status {
                 0 => {
-                    kanji_meaning_lines(k, width, align, text_width, wfmt_args)
+                    kanji_meaning_lines(k, text_width, wfmt_args)
                 },
                 1 => {
-                    kanji_reading_lines(k, width, align, text_width, wfmt_args)
+                    kanji_reading_lines(k, text_width, wfmt_args)
                 },
                 2 => {
                     let label = "Visually Similar Kanji:";
-                    list_kanji_from_ids(conn, k.data.visually_similar_subject_ids.clone(), label, width, align).await
+                    list_kanji_from_ids(conn, k.data.visually_similar_subject_ids.clone(), label).await
                 },
                 3 => {
                     let label = "Found in Vocab:";
-                    list_vocab_from_ids(conn, k.data.amalgamation_subject_ids.clone(), label, width, align).await
+                    list_vocab_from_ids(conn, k.data.amalgamation_subject_ids.clone(), label).await
                 },
                 4 => {
                     let label = "Radical Combination:";
-                    list_radicals_from_ids(conn, k.data.component_subject_ids.clone(), label, width, align).await
+                    list_radicals_from_ids(conn, k.data.component_subject_ids.clone(), label).await
                 },
                 _ => { vec![] }
             }
@@ -1906,16 +1921,16 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
             };
             match info_status {
                 0 => {
-                    vocab_meaning_lines(v, width, align, text_width, wfmt_args)
+                    vocab_meaning_lines(v, text_width, wfmt_args)
                 },
                 1 => {
-                    vocab_reading_lines(v, width, align, text_width, wfmt_args)
+                    vocab_reading_lines(v, text_width, wfmt_args)
                 },
                 2 => {
-                    get_context_sentences(&v.data.context_sentences, width, text_width)
+                    get_context_sentences(&v.data.context_sentences, text_width, width)
                 },
                 3 => {
-                    vocab_kanji_composition(v, width, align, conn, "Kanji Composition:").await
+                    vocab_kanji_composition(v, conn, "Kanji Composition:").await
                 },
                 _ => { vec![] },
             }
@@ -1930,10 +1945,10 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
 
             match info_status {
                 0 => {
-                    kana_vocab_meaning_lines(kv, width, align, text_width, wfmt_args)
+                    kana_vocab_meaning_lines(kv, text_width, wfmt_args)
                 },
                 1 => {
-                    get_context_sentences(&kv.data.context_sentences, width, text_width)
+                    get_context_sentences(&kv.data.context_sentences, text_width, width)
                 },
                 _ => { vec![] },
             }
@@ -1942,17 +1957,17 @@ async fn get_info_lines(subject: &Subject, info_status: usize, width: usize, tex
     }
 }
 
-fn kana_vocab_meaning_lines(kv: &wanidata::KanaVocab, width: usize, align: console::Alignment, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
+fn kana_vocab_meaning_lines(kv: &wanidata::KanaVocab, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
     let mut lines = vec![];
     let meanings = kv.primary_meanings()
         .join(", ");
     if meanings.len() > 0 {
-        lines.push(pad_str(&meanings, width, align, None).to_string());
+        lines.push(meanings);
     }
     let alt_meanings = kv.alt_meanings()
         .join(", ");
     if alt_meanings.len() > 0 {
-        lines.push(pad_str(&alt_meanings, width, align, None).to_string());
+        lines.push(alt_meanings);
     }
     lines.push("---".to_owned());
     let mnemonic = wanidata::format_wani_text(&kv.data.meaning_mnemonic, &wfmt_args);
@@ -1960,9 +1975,9 @@ fn kana_vocab_meaning_lines(kv: &wanidata::KanaVocab, width: usize, align: conso
     lines
 }
 
-async fn vocab_kanji_composition(v: &wanidata::Vocab, width: usize, align: console::Alignment, conn: &AsyncConnection ,label: &str) -> Vec<String> {
+async fn vocab_kanji_composition(v: &wanidata::Vocab, conn: &AsyncConnection, label: &str) -> Vec<String> {
     let mut lines = vec![];
-    lines.push(pad_str(label, width, align, None).to_string());
+    lines.push(label.to_owned());
     match lookup_kanji(conn, v.data.component_subject_ids.clone()).await {
         Ok(kanji) => {
             let mut i = 0;
@@ -1980,7 +1995,7 @@ async fn vocab_kanji_composition(v: &wanidata::Vocab, width: usize, align: conso
                     i += 1;
                     j += 1;
                 }
-                lines.push(pad_str(&kanji_line.iter().join(", "), width, align, None).to_string())
+                lines.push(kanji_line.iter().join(", "));
             }
 
         },
@@ -1991,17 +2006,17 @@ async fn vocab_kanji_composition(v: &wanidata::Vocab, width: usize, align: conso
     lines
 }
 
-fn vocab_reading_lines(v: &wanidata::Vocab, width: usize, align: console::Alignment, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
+fn vocab_reading_lines(v: &wanidata::Vocab, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
     let mut lines = vec![];
     let readings = v.primary_readings()
         .join(", ");
     if readings.len() > 0 {
-        lines.push(pad_str(&readings, width, align, None).to_string());
+        lines.push(readings);
     }
     let alt_readings = v.alt_readings()
         .join(", ");
     if alt_readings.len() > 0 {
-        lines.push(pad_str(&alt_readings, width, align, None).to_string());
+        lines.push(alt_readings);
     }
     lines.push("---".to_owned());
     let mnemonic = wanidata::format_wani_text(&v.data.reading_mnemonic, &wfmt_args);
@@ -2009,21 +2024,21 @@ fn vocab_reading_lines(v: &wanidata::Vocab, width: usize, align: console::Alignm
     lines
 }
 
-fn vocab_meaning_lines(v: &wanidata::Vocab, width: usize, align: console::Alignment, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
+fn vocab_meaning_lines(v: &wanidata::Vocab, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
     let mut lines = vec![];
     let meanings = v.primary_meanings()
         .join(", ");
     if meanings.len() > 0 {
-        lines.push(pad_str(&meanings, width, align, None).to_string());
+        lines.push(meanings);
     }
     let alt_meanings = v.alt_meanings()
         .join(", ");
     if alt_meanings.len() > 0 {
-        lines.push(pad_str(&alt_meanings, width, align, None).to_string());
+        lines.push(alt_meanings);
     }
     if v.data.parts_of_speech.len() > 0 {
         lines.push("---".to_owned());
-        lines.push(pad_str(&v.data.parts_of_speech.join(", "), width, align, None).to_string())
+        lines.push(v.data.parts_of_speech.join(", "));
     }
     lines.push("---".to_owned());
     let mnemonic = wanidata::format_wani_text(&v.data.meaning_mnemonic, &wfmt_args);
@@ -2031,17 +2046,17 @@ fn vocab_meaning_lines(v: &wanidata::Vocab, width: usize, align: console::Alignm
     lines
 }
 
-fn kanji_reading_lines(k: &wanidata::Kanji, width: usize, align: console::Alignment, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
+fn kanji_reading_lines(k: &wanidata::Kanji, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
     let mut lines = vec![];
     let readings = k.primary_readings()
         .join(", ");
     if readings.len() > 0 {
-        lines.push(pad_str(&readings, width, align, None).to_string());
+        lines.push(readings);
     }
     let alt_readings = k.alt_readings()
         .join(", ");
     if alt_readings.len() > 0 {
-        lines.push(pad_str(&alt_readings, width, align, None).to_string());
+        lines.push(alt_readings);
     }
     lines.push("---".to_owned());
     let mnemonic = wanidata::format_wani_text(&k.data.reading_mnemonic, &wfmt_args);
@@ -2049,17 +2064,17 @@ fn kanji_reading_lines(k: &wanidata::Kanji, width: usize, align: console::Alignm
     lines
 }
 
-fn kanji_meaning_lines(k: &wanidata::Kanji, width: usize, align: console::Alignment, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
+fn kanji_meaning_lines(k: &wanidata::Kanji, text_width: usize, wfmt_args: &WaniFmtArgs) -> Vec<String> {
     let mut lines = vec![];
     let meanings = k.primary_meanings()
         .join(", ");
     if meanings.len() > 0 {
-        lines.push(pad_str(&meanings, width, align, None).to_string());
+        lines.push(meanings);
     }
     let alt_meanings = k.alt_meanings()
         .join(", ");
     if alt_meanings.len() > 0 {
-        lines.push(pad_str(&alt_meanings, width, align, None).to_string());
+        lines.push(alt_meanings);
     }
     lines.push("---".to_owned());
     let mnemonic = wanidata::format_wani_text(&k.data.meaning_mnemonic, wfmt_args);
