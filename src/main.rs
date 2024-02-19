@@ -825,19 +825,20 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
             Subject::Vocab(v) => v.primary_meanings().next(),
             Subject::KanaVocab(kv) => kv.primary_meanings().next(),
         };
-        let meaning_line = if let Some(meaning) = primary_meaning {
-            let padded_meaning = pad_str(meaning, term.size().1.into(), align, None);
-            Some(match subject {
-                Subject::Radical(_) => style(padded_meaning).white().on_blue().to_string(),
-                Subject::Kanji(_) => style(padded_meaning).white().on_red().to_string(),
-                _ => style(padded_meaning).white().on_magenta().to_string(),
-            })
-        } else { None };
 
         let mut card_page = 0;
         'card: loop {
+            let meaning_line = if let Some(meaning) = primary_meaning {
+                let padded_meaning = pad_str(meaning, term.size().1.into(), align, None);
+                Some(match subject {
+                    Subject::Radical(_) => style(padded_meaning).white().on_blue().to_string(),
+                    Subject::Kanji(_) => style(padded_meaning).white().on_red().to_string(),
+                    _ => style(padded_meaning).white().on_magenta().to_string(),
+                })
+            } else { None };
+
             let (width, text_width, _) = print_lesson_screen(&term, &meaning_line, subj_counts, &subject, image_cache, web_config).await?;
-            let lines = get_lesson_info_lines(subject, card_page, &wfmt_args, text_width, conn, align, width).await;
+            let lines = get_lesson_info_lines(subject, card_page, &wfmt_args, text_width, conn, width).await;
             if let None = lines {
                 index += 1;
                 break 'card;
@@ -1741,7 +1742,7 @@ fn get_context_sentences(sentences: &Vec<ContextSentence>, text_width: usize, wi
     lines
 }
 
-async fn get_lesson_info_lines(subject: &Subject, card_page: usize, wfmt_args: &WaniFmtArgs, text_width: usize, conn: &AsyncConnection, align: console::Alignment, width: usize) -> Option<Vec<String>> { 
+async fn get_lesson_info_lines(subject: &Subject, card_page: usize, wfmt_args: &WaniFmtArgs, text_width: usize, conn: &AsyncConnection, width: usize) -> Option<Vec<String>> { 
     match subject {
         Subject::Radical(r) => {
             let num_pages = 2;
