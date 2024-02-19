@@ -1027,7 +1027,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                 vis_input = if is_meaning { &input } else { &kana_input };
                 let (width, _, char_lines) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &vis_input, None).await?;
                 let input_width = console::measure_text_width(&vis_input);
-                term.move_cursor_to(width / 2 + input_width / 2, 2 + char_lines.len())?;
+                term.move_cursor_to((width + input_width) / 2, 2 + char_lines.len())?;
                 term.flush()?;
             }
 
@@ -1122,7 +1122,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
 
             let (width, _, char_lines) = print_review_screen(&term, rev_type, align, subject, review_type_text, &toast, image_cache, web_config, &vis_input, Some(&tuple.2)).await?;
             let input_width = console::measure_text_width(&vis_input);
-            term.move_cursor_to(width / 2 + input_width / 2, 2 + char_lines.len())?;
+            term.move_cursor_to((width + input_width) / 2, 2 + char_lines.len())?;
             term.flush()?;
 
             enum InfoStatus {
@@ -1208,7 +1208,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                 }
 
                 let input_width = console::measure_text_width(&vis_input);
-                term.move_cursor_to(width / 2 + input_width / 2, 2 + char_lines.len())?;
+                term.move_cursor_to((width + input_width) / 2, 2 + char_lines.len())?;
                 term.flush()?;
             }
 
