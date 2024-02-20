@@ -485,7 +485,7 @@ where I: Iterator<Item = &'a NewReview> {
 }
 
 // TODO - save reviews in another thread
-async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: &AsyncConnection, web_config: &WaniWebConfig, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
+async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: AsyncConnection, web_config: WaniWebConfig, rate_limit: RateLimitBox) -> Result<(), WaniError> {
     let reviews = Arc::new(reviews);
     let rev = reviews.clone();
     conn.call(move |conn| {
@@ -508,7 +508,7 @@ async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: &AsyncConnection, 
         Ok(())
     }).await?;
 
-    save_reviews_to_wanikani(reviews.deref().iter().map(|t| t.1), rate_limit, web_config, conn).await?;
+    save_reviews_to_wanikani(reviews.deref().iter().map(|t| t.1), &rate_limit, &web_config, &conn).await?;
     Ok(())
 }
 
@@ -1304,6 +1304,7 @@ async fn command_review(args: &Args) {
             ..Default::default()
         };
         let mut stats = ReviewType::Review(stats);
+        let mut save_review_tasks = JoinSet::new();
         loop {
             if let None = first_batch {
                 if assignments.len() == 0 {
@@ -1361,7 +1362,11 @@ async fn command_review(args: &Args) {
                     WaniError::Io(err) => {
                         match err.kind() {
                             io::ErrorKind::Interrupted => {
-                                save_reviews(reviews, conn, web_config, rate_limit).await?;
+                                save_reviews(reviews, conn.clone(), web_config.clone(), rate_limit.clone()).await?;
+                                while let Some(_) = save_review_tasks.join_next().await {
+                                    // Join all
+                                }
+                                audio_task.abort();
                                 return Ok(())
                             },
                             _ => {},
@@ -1372,9 +1377,15 @@ async fn command_review(args: &Args) {
             }
 
             review_result = Some(res);
-            save_reviews(reviews, conn, web_config, rate_limit).await?;
+            let conn = conn.clone();
+            let web_config = web_config.clone();
+            let rate_limit = rate_limit.clone();
+            save_review_tasks.spawn(save_reviews(reviews, conn, web_config, rate_limit));
         }
 
+        while let Some(_) = save_review_tasks.join_next().await {
+            // Join all
+        }
         audio_task.abort();
         review_result.unwrap_or(Ok(()))
     }
