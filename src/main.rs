@@ -391,7 +391,7 @@ fn print_lesson_status(subj_counts: &SubjectCounts, term: &Term, width: usize) -
     Ok(())
 }
 
-async fn save_lessons(reviews: HashMap<i32, NewReview>, rate_limit: &RateLimitBox, web_config: &WaniWebConfig, conn: &AsyncConnection) -> Result<(), WaniError> {
+async fn save_lessons(reviews: HashMap<i32, NewReview>, rate_limit: RateLimitBox, web_config: WaniWebConfig, conn: AsyncConnection) -> Result<(), WaniError> {
     let reviews = Arc::new(reviews);
     let rev = reviews.clone();
     conn.call(move |conn| {
@@ -414,7 +414,7 @@ async fn save_lessons(reviews: HashMap<i32, NewReview>, rate_limit: &RateLimitBo
         Ok(())
     }).await?;
 
-    save_lessons_to_wanikani(reviews.iter().map(|t| t.1), rate_limit, web_config, conn).await
+    save_lessons_to_wanikani(reviews.iter().map(|t| t.1), &rate_limit, &web_config, &conn).await
 }
 
 async fn save_lessons_to_wanikani<'a, I>(lessons: I, rate_limit: &RateLimitBox, web_config: &WaniWebConfig, conn: &AsyncConnection) -> Result<(), WaniError> 
@@ -755,6 +755,7 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
     }
 
     let mut rev_type = ReviewType::Lesson(subject_counts);
+    let mut save_lesson_tasks = JoinSet::new();
     while assignments.len() > 0 {
         let batch_size = min(ideal_batch_size, assignments.len());
         let mut batch = Vec::with_capacity(batch_size);
@@ -763,9 +764,12 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
             batch.push(assignments.remove(i));
         }
 
-        let _ = do_lesson_batch(batch, &mut rev_type, &subjects_by_id, image_cache, web_config, c, &audio_tx, p_config, rate_limit).await;
+        let _ = do_lesson_batch(batch, &mut rev_type, &subjects_by_id, image_cache, web_config, c, &audio_tx, p_config, rate_limit, &mut save_lesson_tasks).await;
     }
 
+    while let Some(_) = save_lesson_tasks.join_next().await {
+        // Join all
+    }
     audio_task.abort();
     Ok(())
 }
@@ -797,7 +801,7 @@ fn show_review_help(term: &Term, align: console::Alignment) {
     let _ = term.read_key();
 }
 
-async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewType, subjects: &HashMap<i32, Subject>, image_cache: &PathBuf, web_config: &WaniWebConfig, conn: &AsyncConnection, audio_tx: &Sender<AudioMessage>, p_config: &ProgramConfig, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
+async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewType, subjects: &HashMap<i32, Subject>, image_cache: &PathBuf, web_config: &WaniWebConfig, conn: &AsyncConnection, audio_tx: &Sender<AudioMessage>, p_config: &ProgramConfig, rate_limit: &RateLimitBox, save_lesson_tasks: &mut JoinSet<Result<(), WaniError>>) -> Result<(), WaniError> {
     if batch.len() == 0 {
         return Ok(());
     }
@@ -927,7 +931,10 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
 
     do_reviews_inner(subjects, web_config, p_config, image_cache, &mut reviews, &mut batch, subj_counts, audio_tx, conn).await?;
 
-    let _ = save_lessons(reviews, rate_limit, web_config, conn).await;
+    let rate_limit = rate_limit.clone();
+    let web_config = web_config.clone();
+    let conn = conn.clone();
+    save_lesson_tasks.spawn(save_lessons(reviews, rate_limit, web_config, conn));
 
     Ok(())
 }
