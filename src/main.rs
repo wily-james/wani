@@ -485,7 +485,7 @@ where I: Iterator<Item = &'a NewReview> {
 }
 
 // TODO - save reviews in another thread
-async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: AsyncConnection, web_config: WaniWebConfig, rate_limit: RateLimitBox) -> Result<(), WaniError> {
+async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: AsyncConnection, web_config: WaniWebConfig, rate_limit: RateLimitBox, debug: bool) -> Result<(), WaniError> {
     let reviews = Arc::new(reviews);
     let rev = reviews.clone();
     conn.call(move |conn| {
@@ -508,11 +508,11 @@ async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: AsyncConnection, w
         Ok(())
     }).await?;
 
-    save_reviews_to_wanikani(reviews.deref().iter().map(|t| t.1), &rate_limit, &web_config, &conn).await?;
+    save_reviews_to_wanikani(reviews.deref().iter().map(|t| t.1), &rate_limit, &web_config, &conn, debug).await?;
     Ok(())
 }
 
-async fn save_reviews_to_wanikani<'a, I>(reviews: I, rate_limit: &RateLimitBox, web_config: &WaniWebConfig, conn: &AsyncConnection) -> Result<Vec<wanidata::Review>, WaniError>
+async fn save_reviews_to_wanikani<'a, I>(reviews: I, rate_limit: &RateLimitBox, web_config: &WaniWebConfig, conn: &AsyncConnection, debug: bool) -> Result<Vec<wanidata::Review>, WaniError>
 where I: Iterator<Item = &'a NewReview> {
     let mut join_set = JoinSet::new();
     for review in reviews {
@@ -589,13 +589,15 @@ where I: Iterator<Item = &'a NewReview> {
         }
     }
 
-    if had_connection_issue {
+    if debug && had_connection_issue {
         println!("Unable to submit review to WaniKani due to internet connection issue.");
         println!("Review progress is still saved locally.");
     }
 
-    for e in errors {
-        println!("{}", e);
+    if debug {
+        for e in errors {
+            println!("{}", e);
+        }
     }
 
     Ok(saved_reviews)
@@ -1369,7 +1371,7 @@ async fn command_review(args: &Args) {
                     WaniError::Io(err) => {
                         match err.kind() {
                             io::ErrorKind::Interrupted => {
-                                save_reviews(reviews, conn.clone(), web_config.clone(), rate_limit.clone()).await?;
+                                save_reviews(reviews, conn.clone(), web_config.clone(), rate_limit.clone(), true).await?;
                                 while let Some(_) = save_review_tasks.join_next().await {
                                     // Join all
                                 }
@@ -1387,7 +1389,7 @@ async fn command_review(args: &Args) {
             let conn = conn.clone();
             let web_config = web_config.clone();
             let rate_limit = rate_limit.clone();
-            save_review_tasks.spawn(save_reviews(reviews, conn, web_config, rate_limit));
+            save_review_tasks.spawn(save_reviews(reviews, conn, web_config, rate_limit, false));
         }
 
         while let Some(_) = save_review_tasks.join_next().await {
@@ -1457,7 +1459,7 @@ async fn command_review(args: &Args) {
                 }).await;
             }
 
-            let _ = save_reviews_to_wanikani(existing_reviews.finished_reviews.iter(), &rate_limit, &web_config, &c).await;
+            let _ = save_reviews_to_wanikani(existing_reviews.finished_reviews.iter(), &rate_limit, &web_config, &c, false).await;
             for review in existing_reviews.finished_reviews.iter() {
                 if let Some(t) = assignments.iter().find_position(|a| a.id == review.assignment_id) {
                     assignments.remove(t.0);
