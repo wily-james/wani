@@ -729,7 +729,7 @@ async fn command_lesson(args: &Args) {
 
 async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i32, Subject>, audio_cache: PathBuf, web_config: &WaniWebConfig, p_config: &ProgramConfig, image_cache: &PathBuf, c: &AsyncConnection, rate_limit: &RateLimitBox) -> Result<(), WaniError> {
     assignments.reverse();
-    let batch_size = min(5, assignments.len());
+    let ideal_batch_size = 5;
     let (audio_tx, mut rx) = mpsc::channel::<AudioMessage>(5);
     let audio_web_config = web_config.clone();
     let audio_task = tokio::spawn(async move {
@@ -756,6 +756,7 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
 
     let mut rev_type = ReviewType::Lesson(subject_counts);
     while assignments.len() > 0 {
+        let batch_size = min(ideal_batch_size, assignments.len());
         let mut batch = Vec::with_capacity(batch_size);
         //assignments.shuffle(&mut thread_rng());
         for i in (assignments.len() - batch_size..assignments.len()).rev() {
@@ -854,6 +855,10 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
                     if card_page > 0 {
                         card_page -= 1;
                     }
+                    else if index > 0 {
+                        index -= 1;
+                        continue 'flashcards;
+                    }
                 },
                 console::Key::ArrowRight => {
                     card_page = card_page.wrapping_add(1);
@@ -872,6 +877,10 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
                         'N' | 'a' | 'A' => {
                             if card_page > 0 {
                                 card_page -= 1;
+                            }
+                            else if index > 0 {
+                                index -= 1;
+                                continue 'flashcards;
                             }
                         },
                         'j' | 'J' => {
