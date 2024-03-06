@@ -1705,8 +1705,11 @@ async fn list_radicals_from_ids(conn: &AsyncConnection, ids: Vec<i32>, label: &s
                 while i < radicals.len() && j < radicals_in_line {
                     if let Some(characters) = &radicals[i].data.characters {
                         radical_line.push(format!("{} {}", characters, &radicals[i].primary_meanings().next().unwrap_or(&String::from(""))));
-                        j += 1;
                     }
+                    else {
+                        radical_line.push(format!("{}", &radicals[i].primary_meanings().next().unwrap_or(&String::from("")) ))
+                    }
+                    j += 1;
                     i += 1;
                 }
                 lines.push(radical_line.iter().join(", "));
