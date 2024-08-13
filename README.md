@@ -11,6 +11,7 @@
 This is an unofficial WaniKani client. Use at your own risk.
 
 <!--toc:start-->
+  - [DEMO](#demo)
   - [INSTALL](#install)
     - [From Source](#from-source)
   - [RECOMMENDED SETUP](#recommended-setup)
@@ -19,6 +20,7 @@ This is an unofficial WaniKani client. Use at your own risk.
   - [CONFIGURATION](#configuration)
 <!--toc:end-->
 
+## DEMO
 ![demo](https://raw.githubusercontent.com/wily-james/wani/main/demo.gif)
 
 ## INSTALL
