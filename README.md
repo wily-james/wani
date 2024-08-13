@@ -13,7 +13,6 @@ This is an unofficial WaniKani client. Use at your own risk.
 <!--toc:start-->
   - [INSTALL](#install)
     - [From Source](#from-source)
-    - [Binaries](#binaries)
   - [RECOMMENDED SETUP](#recommended-setup)
   - [USE](#use)
   - [HOTKEYS](#hotkeys)
@@ -30,10 +29,6 @@ With [rust/cargo](https://www.rust-lang.org/tools/install) installed:
 cargo install --git https://github.com/wily-james/wani.git
 ```
 
-### Binaries
-
-TODO
-
 ## RECOMMENDED SETUP
 
 You'll need to provide your WaniKani personal [API token](https://www.wanikani.com/settings/personal_access_tokens).  
@@ -49,7 +44,7 @@ Next, run this command to sync wani with the WaniKani servers:
 ```
 wani sync
 ```
-This can take awhile, but when it's finished, wani should be ready to use online or offline!
+This can take awhile, but when it's finished, wani will be ready to use online or offline!
 
 ## USE
 
