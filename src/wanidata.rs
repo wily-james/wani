@@ -132,13 +132,13 @@ pub enum Subject
     KanaVocab(KanaVocab),
 }
  
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Copy, Clone)]
 pub struct Assignment {
     pub id: i32,
     pub data: AssignmentData,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Copy, Clone)]
 pub struct AssignmentData {
     pub available_at: Option<DateTime<Utc>>,
     pub burned_at: Option<DateTime<Utc>>,
@@ -239,7 +239,7 @@ impl std::convert::From<usize> for ReviewStatus {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Copy, Clone)]
 pub enum SubjectType {
     #[serde(rename="radical")]
     Radical,
@@ -299,7 +299,14 @@ pub struct User
 pub struct UserData
 {
     pub id: String,
+    pub level: i32,
     pub subscription: Subscription,
+}
+
+impl UserData {
+    pub fn is_restricted(&self) -> bool {
+        self.subscription.max_level_granted < 60
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

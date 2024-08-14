@@ -97,6 +97,7 @@ struct ProgramConfig {
     auth: Option<String>,
     data_path: PathBuf,
     colorblind: bool,
+    user: wanidata::UserData,
 }
 
 /// Info needed to make WaniKani web requests
@@ -608,7 +609,7 @@ async fn command_lesson(args: &Args) {
     if let Err(e) = &p_config {
         println!("{}", e);
     }
-    let p_config = p_config.unwrap();
+    let mut p_config = p_config.unwrap();
 
     let rate_limit = Arc::new(Mutex::new(None));
     let web_config = get_web_config(&p_config);
@@ -631,7 +632,8 @@ async fn command_lesson(args: &Args) {
             }
 
             println!("Syncing assignments. . .");
-            let is_user_restricted = is_user_restricted(&web_config, &c, &rate_limit).await;
+            cache_user_info(&mut p_config, &web_config, &c, &rate_limit).await;
+            let is_user_restricted = p_config.user.is_restricted();
             let _ = sync_assignments(&c, &web_config, ass_cache_info, &rate_limit, is_user_restricted).await;
             let assignments = select_data(wanisql::SELECT_LESSON_ASSIGNMENTS, &c, wanisql::parse_assignment, []).await;
             if let Err(e) = assignments {
@@ -761,7 +763,6 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
     while assignments.len() > 0 {
         let batch_size = min(ideal_batch_size, assignments.len());
         let mut batch = Vec::with_capacity(batch_size);
-        //assignments.shuffle(&mut thread_rng());
         for i in (assignments.len() - batch_size..assignments.len()).rev() {
             batch.push(assignments.remove(i));
         }
@@ -1326,6 +1327,42 @@ async fn command_review(args: &Args) {
                     batch_size = min(ideal_batch_size, assignments.len());
                     let mut b = Vec::with_capacity(batch_size);
                     assignments.shuffle(&mut thread_rng());
+
+                    // move current level assignments to back of list so we work on them first
+                    if p_config.user.level > 0 {
+                        let mut write = assignments.len()-1;
+                        for i in (0..assignments.len()).rev() {
+                            let assignment = &assignments[i];
+                            let subject = subjects.get(&assignment.data.subject_id);
+                            if let None = subject {
+                                continue;
+                            }
+                            let level = match subject.unwrap() {
+                                Subject::Radical(r) => {
+                                    r.data.level
+                                },
+                                Subject::Kanji(k) => {
+                                    k.data.level
+                                },
+                                Subject::Vocab(v) => {
+                                    v.data.level
+                                },
+                                Subject::KanaVocab(kv) => {
+                                    kv.data.level
+                                },
+                            };
+
+                            if level != p_config.user.level {
+                                continue;
+                            }
+
+                            let swap = assignments[i];
+                            assignments[i] = assignments[write];
+                            assignments[write] = swap;
+                            write -= 1;
+                        }
+                    }
+
                     for i in (assignments.len() - batch_size..assignments.len()).rev() {
                         b.push(assignments.remove(i));
                     }
@@ -1403,7 +1440,7 @@ async fn command_review(args: &Args) {
     if let Err(e) = &p_config {
         println!("{}", e);
     }
-    let p_config = p_config.unwrap();
+    let mut p_config = p_config.unwrap();
 
     let rate_limit = Arc::new(Mutex::new(None));
     let web_config = get_web_config(&p_config);
@@ -1426,7 +1463,8 @@ async fn command_review(args: &Args) {
             }
 
             println!("Syncing assignments. . .");
-            let is_user_restricted = is_user_restricted(&web_config, &c, &rate_limit).await;
+            cache_user_info(&mut p_config, &web_config, &c, &rate_limit).await;
+            let is_user_restricted = p_config.user.is_restricted();
             let _ = sync_assignments(&c, &web_config, ass_cache_info, &rate_limit, is_user_restricted).await;
 
             let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, [Utc::now().timestamp()]).await;
@@ -2637,7 +2675,7 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
     if let Err(e) = &p_config {
         println!("{}", e);
     }
-    let p_config = p_config.unwrap();
+    let mut p_config = p_config.unwrap();
     let web_config = get_web_config(&p_config);
     if let Err(_) = web_config {
         return;
@@ -2648,7 +2686,7 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
     match conn {
         Err(e) => println!("{}", e),
         Ok(c) => {
-            sync_all(&web_config, &c, ignore_cache).await;
+            sync_all(&mut p_config, &web_config, &c, ignore_cache).await;
         },
     };
 }
@@ -2751,16 +2789,12 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
     });
 }
 
-/// Whether user is restricted to the free-tier WaniKani (levels 1-3).
-/// This checks the user's subscription level, caching the result until the subscription ends,
-/// otherwise re-checking every week.
-async fn is_user_restricted(web_config: &WaniWebConfig, conn: &AsyncConnection, rate_limit: &RateLimitBox) -> bool {
+async fn cache_user_info(config: &mut ProgramConfig, web_config: &WaniWebConfig, conn: &AsyncConnection, rate_limit: &RateLimitBox) {
     match get_user_info(web_config, conn, rate_limit).await {
         Ok(user) => {
-            user.data.subscription.max_level_granted < 60
+            config.user = user.data
         },
         Err(_) => {
-            false
         },
     }
 }
@@ -2795,7 +2829,7 @@ async fn get_user_info(web_config: &WaniWebConfig, conn: &AsyncConnection, rate_
                     Some(updated_after) => {
                         match DateTime::parse_from_rfc3339(updated_after) {
                             Ok(updated_after) => {
-                                let expiration = Utc::now() - chrono::Duration::days(7);
+                                let expiration = Utc::now() - chrono::Duration::days(1);
                                 updated_after.with_timezone(&Utc) < expiration
                             },
                             Err(_) => { 
@@ -2890,7 +2924,7 @@ async fn load_user_from_wk(web_config: &WaniWebConfig, conn: &AsyncConnection, r
     }
 }
 
-async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cache: bool) {
+async fn sync_all(p_config: &mut ProgramConfig, web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cache: bool) {
     async fn sync_subjects(conn: &AsyncConnection, 
                            web_config: &WaniWebConfig, subjects_cache: CacheInfo, rate_limit: &RateLimitBox, is_user_restricted: bool) -> Result<SyncResult, WaniError> {
         let mut next_url: Option<String> = Some("https://api.wanikani.com/v2/subjects".into());
@@ -2907,7 +2941,7 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
                 query.push(("levels", "1,2,3"));
             }
             let info = RequestInfo::<()> {
-                url: url,
+                url,
                 method: RequestMethod::Get,
                 query: if query.len() > 0 { Some(query) } else { None },
                 headers: if let Some(tag) = &subjects_cache.last_modified {
@@ -3042,7 +3076,8 @@ async fn sync_all(web_config: &WaniWebConfig, conn: &AsyncConnection, ignore_cac
     let mut c_infos = c_infos.unwrap();
 
     let rate_limit = Arc::new(Mutex::new(None));
-    let is_user_restricted = is_user_restricted(web_config, conn, &rate_limit).await;
+    cache_user_info(p_config, &web_config, conn, &rate_limit).await;
+    let is_user_restricted = p_config.user.is_restricted();
     println!("Syncing subjects. . .");
     let subj_future = sync_subjects(&conn, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()}), &rate_limit, is_user_restricted);
     println!("Syncing assignments. . .");
@@ -3543,6 +3578,11 @@ fn get_program_config(args: &Args) -> Result<ProgramConfig, WaniError> {
         auth, 
         data_path: datapath,
         colorblind,
+        user: wanidata::UserData { 
+            id: "0".to_owned(), 
+            subscription: wanidata::Subscription { max_level_granted: 60, period_ends_at: None }, 
+            level: 0 
+        }
     })
 }
 
