@@ -277,7 +277,6 @@ async fn main() -> Result<(), WaniError> {
     Ok(())
 }
 
-// TODO - command to preload audios
 fn play_audio(audio_path: &PathBuf) -> Result<(), WaniError> {
     match OutputStream::try_default() {
         Ok(t) => {
@@ -492,7 +491,6 @@ where I: Iterator<Item = &'a NewReview> {
     Ok(())
 }
 
-// TODO - save reviews in another thread
 async fn save_reviews(reviews: HashMap<i32, NewReview>, conn: AsyncConnection, web_config: WaniWebConfig, rate_limit: RateLimitBox, debug: bool) -> Result<(), WaniError> {
     let reviews = Arc::new(reviews);
     let rev = reviews.clone();
