@@ -678,7 +678,7 @@ async fn command_lesson(args: &Args) {
                 }).await;
             }
 
-            let _ = save_lessons_to_wanikani(existing_lessons.finished_reviews.iter(), &rate_limit, &web_config, &c).await;
+            let save_initial_lessons_task = save_lessons_to_wanikani(existing_lessons.finished_reviews.iter(), &rate_limit, &web_config, &c);
 
             let mut use_assignments = Vec::with_capacity(assignments.len());
             for a in assignments {
@@ -691,6 +691,9 @@ async fn command_lesson(args: &Args) {
             let subjects_by_id = get_subjects_for_assignments(&assignments, &c).await;
             if let Err(e) = subjects_by_id {
                 eprintln!("Error loading subjects: {}", e);
+                if let Err(e) = save_initial_lessons_task.await {
+                    eprintln!("Error saving initial lessons to wanikani: {}", e);
+                }
                 return;
             }
             let subjects_by_id = subjects_by_id.unwrap();
@@ -698,6 +701,9 @@ async fn command_lesson(args: &Args) {
             let audio_cache = get_audio_path(&p_config);
             if let Err(e) = audio_cache {
                 eprintln!("{}", e);
+                if let Err(e) = save_initial_lessons_task.await {
+                    eprintln!("Error saving initial lessons to wanikani: {}", e);
+                }
                 return;
             }
             let audio_cache = audio_cache.unwrap();
@@ -705,6 +711,9 @@ async fn command_lesson(args: &Args) {
             let image_cache = get_image_cache(&p_config);
             if let Err(e) = image_cache {
                 eprintln!("{}", e);
+                if let Err(e) = save_initial_lessons_task.await {
+                    eprintln!("Error saving initial lessons to wanikani: {}", e);
+                }
                 return;
             }
             let image_cache = image_cache.unwrap();
@@ -742,6 +751,10 @@ async fn command_lesson(args: &Args) {
             match res {
                 Ok(_) => {},
                 Err(e) => {eprintln!("{:?}", e)},
+            }
+
+            if let Err(e) = save_initial_lessons_task.await {
+                eprintln!("Error saving initial lessons to wanikani: {}", e);
             }
         },
     }
@@ -1546,7 +1559,7 @@ async fn command_review(args: &Args) {
                 }).await;
             }
 
-            let _ = save_reviews_to_wanikani(existing_reviews.finished_reviews.iter(), &rate_limit, &web_config, &c, false).await;
+            let save_inital_reviews_task = save_reviews_to_wanikani(existing_reviews.finished_reviews.iter(), &rate_limit, &web_config, &c, false);
             for review in existing_reviews.finished_reviews.iter() {
                 if let Some(t) = assignments.iter().find_position(|a| a.id == review.assignment_id) {
                     assignments.remove(t.0);
@@ -1556,6 +1569,9 @@ async fn command_review(args: &Args) {
             let subjects_by_id = get_subjects_for_assignments(&assignments, &c).await;
             if let Err(e) = subjects_by_id {
                 eprintln!("Error loading subjects: {}", e);
+                if let Err(e) = save_inital_reviews_task.await {
+                    eprintln!("Error saving initial reviews: {}", e);
+                }
                 return;
             }
             let subjects_by_id = subjects_by_id.unwrap();
@@ -1573,6 +1589,9 @@ async fn command_review(args: &Args) {
             let audio_cache = get_audio_path(&p_config);
             if let Err(e) = audio_cache {
                 eprintln!("{}", e);
+                if let Err(e) = save_inital_reviews_task.await {
+                    eprintln!("Error saving initial reviews: {}", e);
+                }
                 return;
             }
             let audio_cache = audio_cache.unwrap();
@@ -1580,6 +1599,9 @@ async fn command_review(args: &Args) {
             let image_cache = get_image_cache(&p_config);
             if let Err(e) = image_cache {
                 eprintln!("{}", e);
+                if let Err(e) = save_inital_reviews_task.await {
+                    eprintln!("Error saving initial reviews: {}", e);
+                }
                 return;
             }
             let image_cache = image_cache.unwrap();
@@ -1623,6 +1645,10 @@ async fn command_review(args: &Args) {
                 Err(e) => {
                     eprintln!("{}", e);
                 },
+            }
+
+            if let Err(e) = save_inital_reviews_task.await {
+                eprintln!("Error saving initial reviews: {}", e);
             }
         },
     };
