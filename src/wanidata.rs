@@ -10,8 +10,10 @@ use wana_kana::{IsJapaneseChar, IsJapaneseStr};
 
 #[derive(Debug, Deserialize)]
 pub struct WaniResp {
+    /*
     pub url: String,
     pub data_updated_at: Option<String>,
+    */
     #[serde(flatten)]
     pub data: WaniData,
     pub resources_updated: Option<ResourcesUpdated>,
@@ -51,6 +53,7 @@ impl RateLimit {
         if let Err(_) = limit {
             return None;
         }
+        let limit = limit.unwrap();
 
         let remaining = headers.get("RateLimit-Remaining");
         if let None = remaining {
@@ -64,6 +67,7 @@ impl RateLimit {
         if let Err(_) = remaining {
             return None;
         }
+        let remaining = remaining.unwrap();
 
         let reset = headers.get("RateLimit-Reset");
         if let None = reset {
@@ -77,11 +81,12 @@ impl RateLimit {
         if let Err(_) = reset {
             return None;
         }
+        let reset = reset.unwrap();
 
         return Some(RateLimit {
-            limit: limit.unwrap(),
-            remaining: remaining.unwrap(),
-            reset: reset.unwrap(),
+            limit,
+            remaining,
+            reset,
         })
     }
 }

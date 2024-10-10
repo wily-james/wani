@@ -117,11 +117,10 @@ impl Clone for WaniWebConfig {
     }
 }
 
-
 #[derive(Error, Debug)]
 enum WaniError {
     Generic(String),
-    Parse(#[from] serde_json::Error),
+    Serde(#[from] serde_json::Error),
     Sql(#[from] SqlError),
     AsyncSql(#[from] tokio_rusqlite::Error),
     Chrono(#[from] chrono::ParseError),
@@ -146,7 +145,7 @@ impl Display for WaniError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WaniError::Generic(g) => f.write_str(g),
-            WaniError::Parse(e) => e.fmt(f),
+            WaniError::Serde(e) => e.fmt(f),
             WaniError::Sql(e) => e.fmt(f),
             WaniError::AsyncSql(e) => e.fmt(f),
             WaniError::Chrono(e) => e.fmt(f),
@@ -701,12 +700,14 @@ async fn command_lesson(args: &Args) {
                 eprintln!("{}", e);
                 return;
             }
+            let audio_cache = audio_cache.unwrap();
 
             let image_cache = get_image_cache(&p_config);
             if let Err(e) = image_cache {
                 eprintln!("{}", e);
                 return;
             }
+            let image_cache = image_cache.unwrap();
 
             let mut missing_subjs = false; 
             for ass in &assignments {
@@ -737,7 +738,7 @@ async fn command_lesson(args: &Args) {
                         }}).collect_vec();
             }
 
-            let res = do_lessons(assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit).await;
+            let res = do_lessons(assignments, subjects_by_id, audio_cache, &web_config, &p_config, &image_cache, &c, &rate_limit).await;
             match res {
                 Ok(_) => {},
                 Err(e) => {eprintln!("{:?}", e)},
@@ -987,17 +988,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
             break 'subject;
         }
         batch.shuffle(rng);
-        /*  
-            let assignment = batch.iter().find_or_last(|a| { 
-            let subj = subjects.get(&a.data.subject_id).unwrap();
-            if let wanidata::Subject::KanaVocab(_) = subj {
-            return true;
-            }
-            false
-            }).unwrap();
-            */
         let assignment = batch.last().unwrap();
-        //let subj_id = assignment.data.subject_id;
         let review = reviews.get_mut(&assignment.id).unwrap();
         let subject = subjects.get(&assignment.data.subject_id);
         if let None = subject {
@@ -1584,12 +1575,14 @@ async fn command_review(args: &Args) {
                 eprintln!("{}", e);
                 return;
             }
+            let audio_cache = audio_cache.unwrap();
 
             let image_cache = get_image_cache(&p_config);
             if let Err(e) = image_cache {
                 eprintln!("{}", e);
                 return;
             }
+            let image_cache = image_cache.unwrap();
 
             let _ = ctrlc::set_handler(move || {
                 println!("\nreceived Ctrl+C!\nSaving reviews...");
@@ -1624,7 +1617,7 @@ async fn command_review(args: &Args) {
                         }}).collect_vec();
             }
 
-            let res = do_reviews(&mut assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit, first_batch).await;
+            let res = do_reviews(&mut assignments, subjects_by_id, audio_cache, &web_config, &p_config, &image_cache, &c, &rate_limit, first_batch).await;
             match res {
                 Ok(_) => {},
                 Err(e) => {
@@ -2645,8 +2638,8 @@ async fn load_existing_reviews(c: &AsyncConnection, assignments: &Vec<wanidata::
                                 println!("Error loading review: {}", r);
                                 continue;
                             }
-
                             let r = r.unwrap();
+
                             if let Some(available_at) = r.available_at {
                                 if let Some(ass_available) = available_at_by_id.get(&r.assignment_id) {
                                     if ass_available != &available_at {
@@ -2734,6 +2727,7 @@ async fn command_sync(args: &Args, ignore_cache: bool) {
     let p_config = get_program_config(args);
     if let Err(e) = &p_config {
         eprintln!("{}", e);
+        return;
     }
     let mut p_config = p_config.unwrap();
     let web_config = get_web_config(&p_config);

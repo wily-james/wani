@@ -276,25 +276,29 @@ pub(crate) fn select_radicals_by_id(n: usize) -> String {
         std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
 }
 
-pub(crate) fn store_radical(r: wanidata::Radical, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
+pub(crate) fn store_radical(r: wanidata::Radical, stmt: &mut Transaction<'_>) -> Result<usize, WaniError>
 {
     let p = rusqlite::params!(
         format!("{}", r.id),
-        serde_json::to_string(&r.data.aux_meanings).unwrap(),
+        serde_json::to_string(&r.data.aux_meanings)?,
         r.data.created_at.to_rfc3339(),
         r.data.document_url,
         if let Some(hidden_at) = r.data.hidden_at { Some(hidden_at.to_rfc3339()) } else { None },
         format!("{}", r.data.lesson_position),
         format!("{}", r.data.level),
         r.data.meaning_mnemonic,
-        serde_json::to_string(&r.data.meanings).unwrap(),
+        serde_json::to_string(&r.data.meanings)?,
         r.data.slug,
         format!("{}", r.data.spaced_repetition_system_id),
-        serde_json::to_string(&r.data.amalgamation_subject_ids).unwrap(),
+        serde_json::to_string(&r.data.amalgamation_subject_ids)?,
         if let Some(chars) = r.data.characters { Some(chars) } else { None },
-        serde_json::to_string(&r.data.character_images).unwrap(),
+        serde_json::to_string(&r.data.character_images)?,
         );
-    return stmt.execute(INSERT_RADICALS, p);
+
+    match stmt.execute(INSERT_RADICALS, p) {
+        Ok(u) => Ok(u),
+        Err(e) => Err(WaniError::Sql(e)),
+    }
 }
 
 pub(crate) fn parse_radical(r: &rusqlite::Row<'_>) -> Result<wanidata::Radical, WaniError> {
@@ -392,30 +396,34 @@ pub(crate) fn select_kanji_by_id(n: usize) -> String {
         std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
 }
 
-pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
+pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Transaction<'_>) -> Result<usize, WaniError>
 {
     let p = rusqlite::params!(
         format!("{}", k.id),
-        serde_json::to_string(&k.data.aux_meanings).unwrap(),
+        serde_json::to_string(&k.data.aux_meanings)?,
         k.data.created_at.to_rfc3339(),
         k.data.document_url,
         if let Some(hidden_at) = k.data.hidden_at { Some(hidden_at.to_rfc3339()) } else { None },
         format!("{}", k.data.lesson_position),
         format!("{}", k.data.level),
         k.data.meaning_mnemonic,
-        serde_json::to_string(&k.data.meanings).unwrap(),
+        serde_json::to_string(&k.data.meanings)?,
         k.data.slug,
         format!("{}", k.data.spaced_repetition_system_id),
         k.data.characters,
-        serde_json::to_string(&k.data.amalgamation_subject_ids).unwrap(),
-        serde_json::to_string(&k.data.component_subject_ids).unwrap(),
+        serde_json::to_string(&k.data.amalgamation_subject_ids)?,
+        serde_json::to_string(&k.data.component_subject_ids)?,
         k.data.meaning_hint,
         k.data.reading_hint,
         k.data.reading_mnemonic,
-        serde_json::to_string(&k.data.readings).unwrap(),
-        serde_json::to_string(&k.data.visually_similar_subject_ids).unwrap(),
+        serde_json::to_string(&k.data.readings)?,
+        serde_json::to_string(&k.data.visually_similar_subject_ids)?,
         );
-    return stmt.execute(INSERT_KANJI, p);
+
+    match stmt.execute(INSERT_KANJI, p) {
+        Ok(u) => Ok(u),
+        Err(e) => Err(WaniError::Sql(e)),
+    }
 }
 
 pub(crate) fn parse_kanji(k: &rusqlite::Row<'_>) -> Result<wanidata::Kanji, WaniError> {
@@ -515,29 +523,33 @@ pub(crate) fn select_vocab_by_id(n: usize) -> String {
         std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
 }
 
-pub(crate) fn store_vocab(v: wanidata::Vocab, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
+pub(crate) fn store_vocab(v: wanidata::Vocab, stmt: &mut Transaction<'_>) -> Result<usize, WaniError>
 {
     let p = rusqlite::params!(
         format!("{}", v.id),
-        serde_json::to_string(&v.data.aux_meanings).unwrap(),
+        serde_json::to_string(&v.data.aux_meanings)?,
         v.data.created_at.to_rfc3339(),
         v.data.document_url,
         if let Some(hidden_at) = v.data.hidden_at { Some(hidden_at.to_rfc3339()) } else { None },
         format!("{}", v.data.lesson_position),
         format!("{}", v.data.level),
         v.data.meaning_mnemonic,
-        serde_json::to_string(&v.data.meanings).unwrap(),
+        serde_json::to_string(&v.data.meanings)?,
         v.data.slug,
         format!("{}", v.data.spaced_repetition_system_id),
         v.data.characters,
-        serde_json::to_string(&v.data.component_subject_ids).unwrap(),
-        serde_json::to_string(&v.data.context_sentences).unwrap(),
-        serde_json::to_string(&v.data.parts_of_speech).unwrap(),
-        serde_json::to_string(&v.data.pronunciation_audios).unwrap(),
-        serde_json::to_string(&v.data.readings).unwrap(),
+        serde_json::to_string(&v.data.component_subject_ids)?,
+        serde_json::to_string(&v.data.context_sentences)?,
+        serde_json::to_string(&v.data.parts_of_speech)?,
+        serde_json::to_string(&v.data.pronunciation_audios)?,
+        serde_json::to_string(&v.data.readings)?,
         v.data.reading_mnemonic
         );
-    return stmt.execute(INSERT_VOCAB, p);
+
+    match stmt.execute(INSERT_VOCAB, p) {
+        Ok(u) => Ok(u),
+        Err(e) => Err(WaniError::Sql(e)),
+    }
 }
 
 pub(crate) fn parse_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::Vocab, WaniError> {
@@ -607,26 +619,30 @@ pub(crate) const INSERT_KANA_VOCAB: &str = "replace into kana_vocab
                              pronunciation_audios)
                             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
 
-pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Transaction<'_>) -> Result<usize, rusqlite::Error>
+pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Transaction<'_>) -> Result<usize, WaniError>
 {
     let p = rusqlite::params!(
         format!("{}", v.id),
-        serde_json::to_string(&v.data.aux_meanings).unwrap(),
+        serde_json::to_string(&v.data.aux_meanings)?,
         v.data.created_at.to_rfc3339(),
         v.data.document_url,
         if let Some(hidden_at) = v.data.hidden_at { Some(hidden_at.to_rfc3339()) } else { None },
         format!("{}", v.data.lesson_position),
         format!("{}", v.data.level),
         v.data.meaning_mnemonic,
-        serde_json::to_string(&v.data.meanings).unwrap(),
+        serde_json::to_string(&v.data.meanings)?,
         v.data.slug,
         format!("{}", v.data.spaced_repetition_system_id),
         v.data.characters,
-        serde_json::to_string(&v.data.context_sentences).unwrap(),
-        serde_json::to_string(&v.data.parts_of_speech).unwrap(),
-        serde_json::to_string(&v.data.pronunciation_audios).unwrap()
+        serde_json::to_string(&v.data.context_sentences)?,
+        serde_json::to_string(&v.data.parts_of_speech)?,
+        serde_json::to_string(&v.data.pronunciation_audios)?
         );
-    return stmt.execute(INSERT_KANA_VOCAB, p);
+
+    match stmt.execute(INSERT_KANA_VOCAB, p) {
+        Ok(u) => Ok(u),
+        Err(e) => Err(WaniError::Sql(e)),
+    }
 }
 
 pub(crate) fn select_kana_vocab_by_id(n: usize) -> String {
