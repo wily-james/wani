@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::io::BufReader;
 use std::io::Write;
 use std::ops::Deref;
+use std::ops::DerefMut;
 use std::str::FromStr;
 use reqwest::header::HeaderValue;
 use tokio::sync::mpsc::Sender;
@@ -165,6 +166,16 @@ impl Display for WaniError {
                 }
             },
         }
+    }
+}
+
+struct Logger {
+    of: Arc<Mutex<File>>,
+}
+
+impl Logger {
+    async fn write(&self, s: &str) -> std::io::Result<()> {
+        writeln!(self.of.deref().lock().await.deref_mut(), "{}", s)
     }
 }
 
@@ -698,13 +709,13 @@ async fn command_lesson(args: &Args) {
 
             let audio_cache = get_audio_path(&p_config);
             if let Err(e) = audio_cache {
-                eprintln!("{}", e);
+                println!("{}", e);
                 return;
             }
 
             let image_cache = get_image_cache(&p_config);
             if let Err(e) = image_cache {
-                eprintln!("{}", e);
+                println!("{}", e);
                 return;
             }
 
@@ -740,7 +751,7 @@ async fn command_lesson(args: &Args) {
             let res = do_lessons(assignments, subjects_by_id, audio_cache.unwrap(), &web_config, &p_config, &image_cache.unwrap(), &c, &rate_limit).await;
             match res {
                 Ok(_) => {},
-                Err(e) => {eprintln!("{:?}", e)},
+                Err(e) => {println!("{:?}", e)},
             }
         },
     }
@@ -1498,10 +1509,22 @@ async fn command_review(args: &Args) {
     }
     let mut p_config = p_config.unwrap();
 
+    let mut log_path = p_config.data_path.clone();
+    log_path.push("error_log");
+    let file = File::create(log_path);
+    if let Err(e) = &file {
+        eprintln!("{}", e);
+        return;
+    }
+
+    let logger = Logger {
+        of: Arc::new(Mutex::new(file.unwrap())),
+    };
+
     let rate_limit = Arc::new(Mutex::new(None));
     let web_config = get_web_config(&p_config);
     if let Err(e) = web_config {
-        eprintln!("{}", e);
+        let _ = logger.write(&format!("{}", e)).await;
         return;
     }
     let web_config = web_config.unwrap();
@@ -1509,7 +1532,7 @@ async fn command_review(args: &Args) {
     let conn = setup_async_connection(&p_config).await;
     match conn {
         Err(e) => {
-            eprintln!("{}", e);
+            let _ = logger.write(&format!("{}", e)).await;
         }
         Ok(c) => {
             let mut ass_cache_info = CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default() };
@@ -1528,7 +1551,7 @@ async fn command_review(args: &Args) {
             let assignments = select_data(wanisql::SELECT_AVAILABLE_ASSIGNMENTS, &c, wanisql::parse_assignment, [Utc::now().timestamp()]).await;
 
             if let Err(e) = assignments {
-                eprintln!("{}", e);
+                let _ = logger.write(&format!("{}", e)).await;
                 return;
             };
             let mut assignments = assignments.unwrap();
@@ -1543,7 +1566,7 @@ async fn command_review(args: &Args) {
                     existing_reviews 
                 },
                 Err(e) => {
-                    eprintln!("Error loading existing reviews: {}", e);
+                    let _ = logger.write(&format!("Error loading existing reviews: {}", e)).await;
                     LoadedReviews::default()
                 },
             };
@@ -1564,7 +1587,7 @@ async fn command_review(args: &Args) {
 
             let subjects_by_id = get_subjects_for_assignments(&assignments, &c).await;
             if let Err(e) = subjects_by_id {
-                eprintln!("Error loading subjects: {}", e);
+                let _ = logger.write(&format!("Error loading subjects: {}", e)).await;
                 return;
             }
             let subjects_by_id = subjects_by_id.unwrap();
@@ -1581,13 +1604,13 @@ async fn command_review(args: &Args) {
 
             let audio_cache = get_audio_path(&p_config);
             if let Err(e) = audio_cache {
-                eprintln!("{}", e);
+                let _ = logger.write(&format!("{}", e)).await;
                 return;
             }
 
             let image_cache = get_image_cache(&p_config);
             if let Err(e) = image_cache {
-                eprintln!("{}", e);
+                let _ = logger.write(&format!("{}", e)).await;
                 return;
             }
 
@@ -1628,7 +1651,7 @@ async fn command_review(args: &Args) {
             match res {
                 Ok(_) => {},
                 Err(e) => {
-                    eprintln!("{}", e);
+                    let _ = logger.write(&format!("{}", e)).await;
                 },
             }
         },
@@ -2588,11 +2611,7 @@ async fn load_existing_lessons(c: &AsyncConnection, assignments: &Vec<wanidata::
                     Ok(reviews) => {
                         let mut loaded = LoadedReviews::default(); 
                         for r in reviews {
-                            if let Err(r) = r {
-                                println!("Error loading review: {}", r);
-                                continue;
-                            }
-                            let r = r.unwrap();
+                            let r = r?;
                             if let ReviewStatus::Done = r.status {
                                 if assignments.contains(&r.assignment_id) {
                                     loaded.finished_reviews.push(r);
@@ -2641,12 +2660,7 @@ async fn load_existing_reviews(c: &AsyncConnection, assignments: &Vec<wanidata::
                          };
 
                         for r in reviews {
-                            if let Err(r) = r {
-                                println!("Error loading review: {}", r);
-                                continue;
-                            }
-
-                            let r = r.unwrap();
+                            let r = r?;
                             if let Some(available_at) = r.available_at {
                                 if let Some(ass_available) = available_at_by_id.get(&r.assignment_id) {
                                     if ass_available != &available_at {
