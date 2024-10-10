@@ -2771,8 +2771,10 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
             url,
             method: RequestMethod::Get,
             query: if query.len() > 0 { Some(query) } else { None }, 
-            headers: if let Some(tag) = &cache_info.last_modified {
-                Some(vec![(reqwest::header::LAST_MODIFIED.to_string(), tag.to_owned())])
+            headers: if let Some(etag) = &cache_info.etag {
+                Some(vec![(reqwest::header::ETAG.to_string(), etag.to_owned())])
+            } else if let Some(tag) = &cache_info.last_modified {
+                Some(vec![(reqwest::header::IF_MODIFIED_SINCE.to_string(), tag.to_owned())])
             } else { None },
             ..Default::default()
         };
@@ -2827,15 +2829,20 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
 
     if let Some(time) = last_request_time {
         let mut last_modified = None;
-        if let Some(h) = headers {
+        let mut etag = None;
+        if let Some(h) = &headers {
             if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED) {
                 if let Ok(t) = tag.to_str() {
                     last_modified = Some(t.to_owned());
                 }
             }
+
+            if let Some(tag) = h.get(reqwest::header::ETAG) {
+                etag = Some(tag);
+            }
         }
 
-        match update_cache(last_modified, CACHE_TYPE_ASSIGNMENTS, time, None, &conn).await {
+        match update_cache(last_modified, CACHE_TYPE_ASSIGNMENTS, time, etag, &conn).await {
             Ok(_) => (),
             Err(e) => { 
                 eprintln!("Failed to update assignment cache. Error: {}", e);
@@ -3004,8 +3011,10 @@ async fn sync_all(p_config: &mut ProgramConfig, web_config: &WaniWebConfig, conn
                 url,
                 method: RequestMethod::Get,
                 query: if query.len() > 0 { Some(query) } else { None },
-                headers: if let Some(tag) = &subjects_cache.last_modified {
-                    Some(vec![(reqwest::header::LAST_MODIFIED.to_string(), tag.to_owned())])
+                headers: if let Some(etag) = &subjects_cache.etag {
+                    Some(vec![(reqwest::header::ETAG.to_string(), etag.to_owned())])
+                } else if let Some(tag) = &subjects_cache.last_modified {
+                    Some(vec![(reqwest::header::IF_MODIFIED_SINCE.to_string(), tag.to_owned())])
                 } else { None },
                 ..Default::default()
             };
@@ -3111,13 +3120,18 @@ async fn sync_all(p_config: &mut ProgramConfig, web_config: &WaniWebConfig, conn
             }
         }
 
-        if let Some(h) = headers {
+        let mut etag = None;
+        if let Some(h) = &headers { 
+            if let Some(tag) = h.get(reqwest::header::ETAG) {
+                etag = Some(tag);
+            }
+
             if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED) {
                 if let Ok(t) = tag.to_str() {
-                    update_cache(Some(t.to_owned()), CACHE_TYPE_SUBJECTS, last_request_time, None, &conn).await?;
+                    update_cache(Some(t.to_owned()), CACHE_TYPE_SUBJECTS, last_request_time, etag, &conn).await?;
                 }
                 else {
-                    update_cache(None, CACHE_TYPE_SUBJECTS, last_request_time, None, &conn).await?;
+                    update_cache(None, CACHE_TYPE_SUBJECTS, last_request_time, etag, &conn).await?;
                 }
             }
         }
