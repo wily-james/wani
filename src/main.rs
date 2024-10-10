@@ -133,6 +133,7 @@ enum WaniError {
     Usvg(#[from] usvg::Error),
     RateLimit(Option<wanidata::RateLimit>),
     Connection(),
+    Unprocessable(),
 }
 
 impl<T> From<PoisonError<T>> for WaniError {
@@ -156,6 +157,7 @@ impl Display for WaniError {
             WaniError::Reqwest(e) => e.fmt(f),
             WaniError::Usvg(e) => e.fmt(f),
             WaniError::Connection() => f.write_str("Error related to request connection."),
+            WaniError::Unprocessable() => f.write_str("HTTP 422 Unprocessable Entity"),
             WaniError::RateLimit(r) => {
                 match r {
                     Some(r) => f.write_str(&format!("Rate Limit Exceeded Error: {:?}", r)),
@@ -182,7 +184,12 @@ struct AudioInfo {
     content_type: String,
 }
 
-struct AudioMessage {
+enum AudioMessage {
+    PlayAudioMessage(PlayAudioMessage),
+    Quit,
+}
+
+struct PlayAudioMessage {
     send_time: std::time::Instant,
     id: i32,
     audios: Vec<AudioInfo>,
@@ -518,6 +525,7 @@ where I: Iterator<Item = &'a NewReview> {
     let mut join_set = JoinSet::new();
     for review in reviews {
         if let ReviewStatus::Done = review.status {
+            let id = review.assignment_id;
             let new_review = wanidata::NewReviewRequest {
                 review: review.clone()
             };
@@ -530,11 +538,10 @@ where I: Iterator<Item = &'a NewReview> {
                 headers: None,
             };
 
-
             let rate_limit = rate_limit.clone();
             let web_config = web_config.clone();
             join_set.spawn(async move {
-                return send_throttled_request(info, rate_limit, web_config).await
+                return (id, send_throttled_request(info, rate_limit, web_config).await)
             });
         }
     }
@@ -542,8 +549,8 @@ where I: Iterator<Item = &'a NewReview> {
     let mut had_connection_issue = false;
     let mut errors = vec![];
     let mut saved_reviews = vec![];
-    while let Some(response) = join_set.join_next().await {
-        if let Ok(response) = response {
+    while let Some(res) = join_set.join_next().await {
+        if let Ok((request_assignment_id, response)) = res {
             match response {
                 Ok((wani, _)) => {
                     match wani.data {
@@ -576,11 +583,20 @@ where I: Iterator<Item = &'a NewReview> {
                         _ => {}
                     }
                 },
+
                 Err(e) => {
                     match e {
                         WaniError::Connection() => {
                             had_connection_issue = true;
-                        }
+                        },
+                        WaniError::Unprocessable() => {
+                            // Server returned 422 - no point in keeping a review that can't be
+                            // processed around
+                            conn.call(move |conn| {
+                                conn.execute(wanisql::REMOVE_REVIEW, params![request_assignment_id])?;
+                                Ok(())
+                            }).await?;
+                        },
                         _ => {
                             errors.push(format!("Unable to submit review to WaniKani. {}", e));
                         },
@@ -739,12 +755,20 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
     let audio_task = tokio::spawn(async move {
         let audio_cache = audio_cache;
         let mut last_finish_time = std::time::Instant::now();
-        while let Some(msg) = rx.recv().await {
-            if msg.send_time < last_finish_time {
-                continue;
+        while let Some(m) = rx.recv().await {
+            match m {
+                AudioMessage::PlayAudioMessage(msg) => {
+                    if msg.send_time < last_finish_time {
+                        continue;
+                    }
+                    let _ = play_audio_for_subj(msg.id, msg.audios, &audio_cache, &audio_web_config).await;
+                    last_finish_time = std::time::Instant::now();
+                },
+
+                AudioMessage::Quit => {
+                    break;
+                },
             }
-            let _ = play_audio_for_subj(msg.id, msg.audios, &audio_cache, &audio_web_config).await;
-            last_finish_time = std::time::Instant::now();
         }
     });
 
@@ -773,7 +797,16 @@ async fn do_lessons(mut assignments: Vec<Assignment>, subjects_by_id: HashMap<i3
     while let Some(_) = save_lesson_tasks.join_next().await {
         // Join all
     }
-    audio_task.abort();
+
+    match audio_tx.send(AudioMessage::Quit).await {
+        Ok(_) => {
+            audio_task.await?;
+        },
+        Err(_) => {
+            audio_task.abort();
+        },
+    }
+
     Ok(())
 }
 
@@ -898,7 +931,7 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
                                 Subject::KanaVocab(d) => (d.id, Some(d.data.pronunciation_audios.clone())),
                             };
                             if let Some(audios) = audios {
-                                let _ = audio_tx.send(AudioMessage {
+                                let _ = audio_tx.send(AudioMessage::PlayAudioMessage(PlayAudioMessage{
                                     send_time: std::time::Instant::now(),
                                     id,
                                     audios: audios.iter()
@@ -907,7 +940,7 @@ async fn do_lesson_batch(mut batch: Vec<Assignment>, subj_counts: &mut ReviewTyp
                                             content_type: a.content_type.clone(),
                                         }).collect_vec(),
 
-                                }).await;
+                                })).await;
                             }
                         },
                         _ => {},
@@ -1201,14 +1234,14 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
                                         Subject::KanaVocab(d) => (d.id, Some(d.data.pronunciation_audios.clone())),
                                     };
                                     if let Some(audios) = audios {
-                                        let _ = audio_tx.send(AudioMessage {
+                                        let _ = audio_tx.send(AudioMessage::PlayAudioMessage(PlayAudioMessage {
                                             send_time: std::time::Instant::now(),
                                             id,
                                             audios: audios.iter().map(|a| AudioInfo {
                                                 url: a.url.clone(),
                                                 content_type: a.content_type.clone(),
                                             }).collect_vec(),
-                                        }).await;
+                                        })).await;
                                     }
                                 }
                             },
@@ -1298,12 +1331,19 @@ async fn command_review(args: &Args) {
         let audio_task = tokio::spawn(async move {
             let audio_cache = audio_cache;
             let mut last_finish_time = std::time::Instant::now();
-            while let Some(msg) = rx.recv().await {
-                if msg.send_time < last_finish_time {
-                    continue;
+            while let Some(m) = rx.recv().await {
+                match m {
+                    AudioMessage::PlayAudioMessage(msg) => {
+                        if msg.send_time < last_finish_time {
+                            continue;
+                        }
+                        let _ = play_audio_for_subj(msg.id, msg.audios, &audio_cache, &audio_web_config).await;
+                        last_finish_time = std::time::Instant::now();
+                    },
+                    AudioMessage::Quit => {
+                        break;
+                    }
                 }
-                let _ = play_audio_for_subj(msg.id, msg.audios, &audio_cache, &audio_web_config).await;
-                last_finish_time = std::time::Instant::now();
             }
         });
 
@@ -1412,7 +1452,16 @@ async fn command_review(args: &Args) {
                                 while let Some(_) = save_review_tasks.join_next().await {
                                     // Join all
                                 }
-                                audio_task.abort();
+
+                                match audio_tx.send(AudioMessage::Quit).await {
+                                    Ok(_) => {
+                                        audio_task.await?;
+                                    },
+                                    Err(_) => {
+                                        audio_task.abort();
+                                    },
+                                }
+
                                 return Ok(())
                             },
                             _ => {},
@@ -1432,7 +1481,14 @@ async fn command_review(args: &Args) {
         while let Some(_) = save_review_tasks.join_next().await {
             // Join all
         }
-        audio_task.abort();
+        match audio_tx.send(AudioMessage::Quit).await {
+            Ok(_) => {
+                audio_task.await?;
+            },
+            Err(_) => {
+                audio_task.abort();
+            },
+        }
         review_result.unwrap_or(Ok(()))
     }
 
@@ -3346,7 +3402,7 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
                     Err(WaniError::RateLimit(wanidata::RateLimit::from(r.headers())))
                 },
                 StatusCode::UNPROCESSABLE_ENTITY => {
-                    Err(WaniError::Generic(format!("Unprocessable Enitity. {}", r.text().await.unwrap_or("Unprocessable Entity.".to_owned()))))
+                    Err(WaniError::Unprocessable())
                 },
                 _ => { Err(WaniError::Generic(format!("HTTP status code {}", r.status()))) },
             }
