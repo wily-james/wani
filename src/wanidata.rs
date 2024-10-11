@@ -1,4 +1,4 @@
-/// Data structures (and some related procedures) to model data going to/from WaniKani servers
+///! Data structures (and some related procedures) to model data going to/from WaniKani servers
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};

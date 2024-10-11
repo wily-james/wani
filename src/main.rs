@@ -15,7 +15,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use wanidata::ContextSentence;
 use wanidata::WaniFmtArgs;
-use wanisql::parse_review;
+use wanisql::{parse_review, CacheInfo};
 use std::sync::{Arc, PoisonError}; use std::{fmt::Display, fs::{self, File}, io::{self, BufRead}, path::Path, path::PathBuf};
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
@@ -127,7 +127,6 @@ enum WaniError {
     Poison,
     JoinError(#[from] tokio::task::JoinError),
     Io(#[from] std::io::Error),
-    //Audio,
     Reqwest(#[from] reqwest::Error),
     Usvg(#[from] usvg::Error),
     RateLimit(Option<wanidata::RateLimit>),
@@ -195,18 +194,6 @@ struct PlayAudioMessage {
 }
 
 type RateLimitBox = Arc<Mutex<Option<RateLimit>>>;
-
-#[derive(Default)]
-struct CacheInfo {
-    id: usize, // See CACHE_TYPE_* constants
-    etag: Option<String>,
-    last_modified: Option<String>,
-    updated_after: Option<String>,
-}
-
-const CACHE_TYPE_SUBJECTS: usize = 0;
-const CACHE_TYPE_ASSIGNMENTS: usize = 1;
-const CACHE_TYPE_USER: usize = 2;
 
 #[derive(Default)]
 struct SubjectCounts {
@@ -637,10 +624,10 @@ async fn command_lesson(args: &Args) {
     match conn {
         Err(e) => eprintln!("{}", e),
         Ok(c) => {
-            let mut ass_cache_info = CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default() };
-            let mut c_infos = get_all_cache_infos(&c, false).await;
+            let mut ass_cache_info = CacheInfo { id: wanisql::CACHE_TYPE_SUBJECTS, ..Default::default() };
+            let mut c_infos = wanisql::get_all_cache_infos(&c, false).await;
             if let Ok(c_infos) = &mut c_infos {
-                if let Some(info) = c_infos.remove(&CACHE_TYPE_SUBJECTS) {
+                if let Some(info) = c_infos.remove(&wanisql::CACHE_TYPE_SUBJECTS) {
                     ass_cache_info = info;
                 }
             }
@@ -1516,10 +1503,10 @@ async fn command_review(args: &Args) {
             eprintln!("{}", e);
         }
         Ok(c) => {
-            let mut ass_cache_info = CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default() };
-            let mut c_infos = get_all_cache_infos(&c, false).await;
+            let mut ass_cache_info = CacheInfo { id: wanisql::CACHE_TYPE_SUBJECTS, ..Default::default() };
+            let mut c_infos = wanisql::get_all_cache_infos(&c, false).await;
             if let Ok(c_infos) = &mut c_infos {
-                if let Some(info) = c_infos.remove(&CACHE_TYPE_SUBJECTS) {
+                if let Some(info) = c_infos.remove(&wanisql::CACHE_TYPE_SUBJECTS) {
                     ass_cache_info = info;
                 }
             }
@@ -2325,8 +2312,7 @@ where F: Fn(&str) -> String {
         Ok(request) => {
             if request.status() != reqwest::StatusCode::OK {
                 Err(WaniError::Generic(format!("Error fetching file. HTTP {}", request.status())))
-            }
-            else {
+            } else {
                 if let Ok(mut f) = tokio::fs::File::create(&path).await {
                     let mut body = request.text().await?;
                     body = modify_content(&body);
@@ -2698,7 +2684,7 @@ async fn load_existing_reviews(c: &AsyncConnection, assignments: &Vec<wanidata::
 }
 
 async fn select_data<T, F, P>(sql: &'static str, c: &AsyncConnection, parse_fn: F, params: P) -> Result<Vec<T>, tokio_rusqlite::Error> 
-where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_>) -> Result<T, WaniError>, P: Send + Sync + 'static + rusqlite::Params {
+where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_>) -> Result<T, wanisql::WaniSqlError>, P: Send + Sync + 'static + rusqlite::Params {
     return c.call(move |c| { 
         let stmt = c.prepare(sql);
         match stmt {
@@ -2723,30 +2709,6 @@ where T: Send + Sync + 'static, F : Send + Sync + 'static + Fn(&rusqlite::Row<'_
             }
         }
     }).await;
-}
-
-async fn get_all_cache_infos(conn: &AsyncConnection, ignore_cache: bool) -> Result<HashMap<usize, CacheInfo>, WaniError> {
-    if ignore_cache {
-        return Ok(HashMap::new());
-    }
-
-    Ok(conn.call(|conn| {
-        let mut stmt = conn.prepare("select i.id, i.last_modified, i.updated_after, i.etag from cache_info i;")?;
-        let infos = stmt.query_map([],
-                                   |r| Ok(CacheInfo {
-                                       id: r.get::<usize, usize>(0)?,
-                                       last_modified: r.get::<usize, Option<String>>(1)?, 
-                                       updated_after: r.get::<usize, Option<String>>(2)?,
-                                       etag: r.get::<usize, Option<String>>(3)? }))?;
-
-        let mut map = HashMap::new();
-        for info in infos {
-            if let Ok(i) = info {
-                map.insert(i.id, i);
-            }
-        }
-        return Ok(map);
-    }).await?)
 }
 
 async fn command_sync(args: &Args, ignore_cache: bool) {
@@ -2862,7 +2824,7 @@ async fn sync_assignments(conn: &AsyncConnection, web_config: &WaniWebConfig, ca
             }
         }
 
-        match update_cache(last_modified, CACHE_TYPE_ASSIGNMENTS, time, etag, &conn).await {
+        match update_cache(last_modified, wanisql::CACHE_TYPE_ASSIGNMENTS, time, etag, &conn).await {
             Ok(_) => (),
             Err(e) => { 
                 eprintln!("Failed to update assignment cache. Error: {}", e);
@@ -2904,7 +2866,7 @@ async fn get_user_info(web_config: &WaniWebConfig, conn: &AsyncConnection, rate_
         }
         return Ok(map);
     }).await?;
-    let user_cache = cache_info.remove(&CACHE_TYPE_USER);
+    let user_cache = cache_info.remove(&wanisql::CACHE_TYPE_USER);
 
     let users = select_data(wanisql::SELECT_USER, conn, wanisql::parse_user, []).await?;
 
@@ -2993,7 +2955,7 @@ async fn load_user_from_wk(web_config: &WaniWebConfig, conn: &AsyncConnection, r
                         eprintln!("Error saving user: {}", e);
                     }
 
-                    let res = update_cache(None, CACHE_TYPE_USER, last_request_time, etag, conn).await;
+                    let res = update_cache(None, wanisql::CACHE_TYPE_USER, last_request_time, etag, conn).await;
                     if let Err(e) = res {
                         eprintln!("Error updating user cache: {}", e);
                     }
@@ -3148,10 +3110,10 @@ async fn sync_all(p_config: &mut ProgramConfig, web_config: &WaniWebConfig, conn
 
             if let Some(tag) = h.get(reqwest::header::LAST_MODIFIED) {
                 if let Ok(t) = tag.to_str() {
-                    update_cache(Some(t.to_owned()), CACHE_TYPE_SUBJECTS, last_request_time, etag, &conn).await?;
+                    update_cache(Some(t.to_owned()), wanisql::CACHE_TYPE_SUBJECTS, last_request_time, etag, &conn).await?;
                 }
                 else {
-                    update_cache(None, CACHE_TYPE_SUBJECTS, last_request_time, etag, &conn).await?;
+                    update_cache(None, wanisql::CACHE_TYPE_SUBJECTS, last_request_time, etag, &conn).await?;
                 }
             }
         }
@@ -3162,7 +3124,7 @@ async fn sync_all(p_config: &mut ProgramConfig, web_config: &WaniWebConfig, conn
         });
     }
 
-    let c_infos = get_all_cache_infos(&conn, ignore_cache).await;
+    let c_infos = wanisql::get_all_cache_infos(&conn, ignore_cache).await;
     if let Err(e) = c_infos {
         eprintln!("Error fetching cache infos. Error: {}", e);
         return;
@@ -3173,9 +3135,9 @@ async fn sync_all(p_config: &mut ProgramConfig, web_config: &WaniWebConfig, conn
     cache_user_info(p_config, &web_config, conn, &rate_limit).await;
     let is_user_restricted = p_config.user.is_restricted();
     println!("Syncing subjects. . .");
-    let subj_future = sync_subjects(&conn, &web_config, c_infos.remove(&CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: CACHE_TYPE_SUBJECTS, ..Default::default()}), &rate_limit, is_user_restricted);
+    let subj_future = sync_subjects(&conn, &web_config, c_infos.remove(&wanisql::CACHE_TYPE_SUBJECTS).unwrap_or(CacheInfo { id: wanisql::CACHE_TYPE_SUBJECTS, ..Default::default()}), &rate_limit, is_user_restricted);
     println!("Syncing assignments. . .");
-    let ass_future = sync_assignments(&conn, &web_config, c_infos.remove(&CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo { id: CACHE_TYPE_ASSIGNMENTS, ..Default::default()}), &rate_limit, is_user_restricted);
+    let ass_future = sync_assignments(&conn, &web_config, c_infos.remove(&wanisql::CACHE_TYPE_ASSIGNMENTS).unwrap_or(CacheInfo { id: wanisql::CACHE_TYPE_ASSIGNMENTS, ..Default::default()}), &rate_limit, is_user_restricted);
     let res = join![subj_future, ass_future];
 
     match res.0 {
@@ -3217,7 +3179,7 @@ fn command_init(p_config: &ProgramConfig) {
     match conn {
         Err(e) => eprintln!("{}", e),
         Ok(c) => {
-            match setup_db(&c) {
+            match wanisql::setup_db(&c) {
                 Ok(_) => {},
                 Err(e) => {
                     eprintln!("Error setting up SQLite DB: {}", e.to_string())
@@ -3225,37 +3187,6 @@ fn command_init(p_config: &ProgramConfig) {
             }
         },
     };
-}
-
-fn setup_db(c: &Connection) -> Result<(), SqlError> {
-    // Arrays of non-id'ed objects will be stored as json
-    // Arrays of ints will be stored as json "[1,2,3]"
-    
-    // CacheInfo
-    c.execute(
-        "create table if not exists cache_info (
-            id integer primary key,
-            etag text,
-            last_modified text,
-            updated_after text
-        )", [])?;
-
-    c.execute("insert or ignore into cache_info (id) values (?1),(?2),(?3)", 
-              params![
-                CACHE_TYPE_SUBJECTS, 
-                CACHE_TYPE_ASSIGNMENTS, 
-                CACHE_TYPE_USER, 
-              ])?;
-
-    c.execute(wanisql::CREATE_REVIEWS_TBL, [])?;
-    c.execute(wanisql::CREATE_RADICALS_TBL, [])?;
-    c.execute(wanisql::CREATE_KANJI_TBL, [])?;
-    c.execute(wanisql::CREATE_VOCAB_TBL, [])?;
-    c.execute(wanisql::CREATE_KANA_VOCAB_TBL, [])?;
-    c.execute(wanisql::CREATE_ASSIGNMENTS_TBL, [])?;
-    c.execute(wanisql::CREATE_ASSIGNMENTS_INDEX, [])?;
-    c.execute(wanisql::CREATE_USER_TBL, [])?;
-    Ok(())
 }
 
 fn build_request<'a, T: serde::Serialize + Sized>(info: &RequestInfo<'a, T>, web_config: &WaniWebConfig) -> reqwest::RequestBuilder {
@@ -3568,7 +3499,7 @@ fn setup_connection(p_config: &ProgramConfig) -> Result<Connection, WaniError> {
     match Connection::open(&path) {
         Ok(c) => {
             if do_init {
-                match setup_db(&c) {
+                match wanisql::setup_db(&c) {
                     Ok(_) => {},
                     Err(e) => {
                         eprintln!("Error setting up SQLite DB: {}", e.to_string())

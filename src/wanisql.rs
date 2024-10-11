@@ -1,9 +1,74 @@
-/// Helpers for loading/storing wanidata in Sqlite DB
-
+use std::{collections::HashMap, fmt::{Debug, Display}};
 use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::Transaction;
+use rusqlite::{params, Connection, Transaction};
+use thiserror::Error;
+use tokio_rusqlite::Connection as AsyncConnection;
 
-use crate::{wanidata::{self, AuxMeaning, ContextSentence, PronunciationAudio, VocabReading}, WaniError};
+use crate::wanidata::{self, AuxMeaning, ContextSentence, PronunciationAudio, VocabReading};
+
+///! Helpers for loading/storing wanidata in Sqlite DB
+
+#[derive(Error, Debug)]
+pub(crate) enum WaniSqlError {
+    Serde(#[from] serde_json::Error),
+    Sql(#[from] rusqlite::Error),
+    AsyncSql(#[from] tokio_rusqlite::Error),
+    Chrono(#[from] chrono::ParseError),
+}
+
+impl Display for WaniSqlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaniSqlError::Serde(e) => Display::fmt(&e, f),
+            WaniSqlError::Sql(e) => Display::fmt(&e, f),
+            WaniSqlError::AsyncSql(e) => Display::fmt(&e, f),
+            WaniSqlError::Chrono(e) => Display::fmt(&e, f),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CacheInfo {
+    pub id: usize, // See CACHE_TYPE_* constants
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub updated_after: Option<String>,
+}
+
+pub const CACHE_TYPE_SUBJECTS: usize = 0;
+pub const CACHE_TYPE_ASSIGNMENTS: usize = 1;
+pub const CACHE_TYPE_USER: usize = 2;
+
+pub(crate) fn setup_db(c: &Connection) -> Result<(), rusqlite::Error> {
+    // Arrays of non-id'ed objects will be stored as json
+    // Arrays of ints will be stored as json "[1,2,3]"
+    
+    // CacheInfo
+    c.execute(
+        "create table if not exists cache_info (
+            id integer primary key,
+            etag text,
+            last_modified text,
+            updated_after text
+        )", [])?;
+
+    c.execute("insert or ignore into cache_info (id) values (?1),(?2),(?3)", 
+              params![
+                CACHE_TYPE_SUBJECTS, 
+                CACHE_TYPE_ASSIGNMENTS, 
+                CACHE_TYPE_USER, 
+              ])?;
+
+    c.execute(CREATE_REVIEWS_TBL, [])?;
+    c.execute(CREATE_RADICALS_TBL, [])?;
+    c.execute(CREATE_KANJI_TBL, [])?;
+    c.execute(CREATE_VOCAB_TBL, [])?;
+    c.execute(CREATE_KANA_VOCAB_TBL, [])?;
+    c.execute(CREATE_ASSIGNMENTS_TBL, [])?;
+    c.execute(CREATE_ASSIGNMENTS_INDEX, [])?;
+    c.execute(CREATE_USER_TBL, [])?;
+    Ok(())
+}
 
 pub(crate) const CREATE_USER_TBL: &str = "create table if not exists user (
             id integer primary key,
@@ -16,11 +81,11 @@ pub(crate) const INSERT_USER: &str = "replace into user
 
 pub(crate) const SELECT_USER: &str = "select * from user;";
 
-pub(crate) fn parse_user(r: &rusqlite::Row<'_>) -> Result<wanidata::User, WaniError> {
+pub(crate) fn parse_user(r: &rusqlite::Row<'_>) -> Result<wanidata::User, WaniSqlError> {
     return Ok(serde_json::from_str(&r.get::<usize, String>(1)?)?);
 }
 
-pub(crate) fn store_user(r: &wanidata::User, conn: &mut rusqlite::Connection) -> Result<usize, WaniError>
+pub(crate) fn store_user(r: &wanidata::User, conn: &mut rusqlite::Connection) -> Result<usize, WaniSqlError>
 {
     return Ok(conn.execute(INSERT_USER, [serde_json::to_string(r)?])?);
 }
@@ -74,7 +139,7 @@ pub(crate) const SELECT_LESSONS: &str = "select
 
 pub(crate) const REMOVE_REVIEW: &str = "delete from new_reviews where assignment_id = ?1;";
 
-pub(crate) fn parse_review(r: &rusqlite::Row<'_>) -> Result<wanidata::NewReview, WaniError> {
+pub(crate) fn parse_review(r: &rusqlite::Row<'_>) -> Result<wanidata::NewReview, WaniSqlError> {
     return Ok(wanidata::NewReview {
         id: Some(r.get::<usize, i32>(0)?),
         assignment_id: r.get::<usize, i32>(1)?,
@@ -170,7 +235,7 @@ pub(crate) const SELECT_AVAILABLE_ASSIGNMENTS: &str = "select
                             subject_type from assignments 
                         where available_at < ?1;";// and started_at is not null;";
 
-pub(crate) fn parse_assignment(r: &rusqlite::Row<'_>) -> Result<wanidata::Assignment, WaniError> {
+pub(crate) fn parse_assignment(r: &rusqlite::Row<'_>) -> Result<wanidata::Assignment, WaniSqlError> {
     return Ok(wanidata::Assignment {
         id: r.get::<usize, i32>(0)?,
         data: wanidata::AssignmentData { 
@@ -276,7 +341,7 @@ pub(crate) fn select_radicals_by_id(n: usize) -> String {
         std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
 }
 
-pub(crate) fn store_radical(r: wanidata::Radical, stmt: &mut Transaction<'_>) -> Result<usize, WaniError>
+pub(crate) fn store_radical(r: wanidata::Radical, stmt: &mut Transaction<'_>) -> Result<usize, WaniSqlError>
 {
     let p = rusqlite::params!(
         format!("{}", r.id),
@@ -297,11 +362,11 @@ pub(crate) fn store_radical(r: wanidata::Radical, stmt: &mut Transaction<'_>) ->
 
     match stmt.execute(INSERT_RADICALS, p) {
         Ok(u) => Ok(u),
-        Err(e) => Err(WaniError::Sql(e)),
+        Err(e) => Err(WaniSqlError::Sql(e)),
     }
 }
 
-pub(crate) fn parse_radical(r: &rusqlite::Row<'_>) -> Result<wanidata::Radical, WaniError> {
+pub(crate) fn parse_radical(r: &rusqlite::Row<'_>) -> Result<wanidata::Radical, WaniSqlError> {
     return Ok(wanidata::Radical {
         id: r.get::<usize, i32>(0)?,
         data: wanidata::RadicalData { 
@@ -396,7 +461,7 @@ pub(crate) fn select_kanji_by_id(n: usize) -> String {
         std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
 }
 
-pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Transaction<'_>) -> Result<usize, WaniError>
+pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Transaction<'_>) -> Result<usize, WaniSqlError>
 {
     let p = rusqlite::params!(
         format!("{}", k.id),
@@ -422,11 +487,11 @@ pub(crate) fn store_kanji(k: wanidata::Kanji, stmt: &mut Transaction<'_>) -> Res
 
     match stmt.execute(INSERT_KANJI, p) {
         Ok(u) => Ok(u),
-        Err(e) => Err(WaniError::Sql(e)),
+        Err(e) => Err(WaniSqlError::Sql(e)),
     }
 }
 
-pub(crate) fn parse_kanji(k: &rusqlite::Row<'_>) -> Result<wanidata::Kanji, WaniError> {
+pub(crate) fn parse_kanji(k: &rusqlite::Row<'_>) -> Result<wanidata::Kanji, WaniSqlError> {
     return Ok(wanidata::Kanji {
         id: k.get::<usize, i32>(0)?,
         data: wanidata::KanjiData { 
@@ -523,7 +588,7 @@ pub(crate) fn select_vocab_by_id(n: usize) -> String {
         std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
 }
 
-pub(crate) fn store_vocab(v: wanidata::Vocab, stmt: &mut Transaction<'_>) -> Result<usize, WaniError>
+pub(crate) fn store_vocab(v: wanidata::Vocab, stmt: &mut Transaction<'_>) -> Result<usize, WaniSqlError>
 {
     let p = rusqlite::params!(
         format!("{}", v.id),
@@ -548,11 +613,11 @@ pub(crate) fn store_vocab(v: wanidata::Vocab, stmt: &mut Transaction<'_>) -> Res
 
     match stmt.execute(INSERT_VOCAB, p) {
         Ok(u) => Ok(u),
-        Err(e) => Err(WaniError::Sql(e)),
+        Err(e) => Err(WaniSqlError::Sql(e)),
     }
 }
 
-pub(crate) fn parse_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::Vocab, WaniError> {
+pub(crate) fn parse_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::Vocab, WaniSqlError> {
     return Ok(wanidata::Vocab {
         id: v.get::<usize, i32>(0)?,
         data: wanidata::VocabData { 
@@ -619,7 +684,7 @@ pub(crate) const INSERT_KANA_VOCAB: &str = "replace into kana_vocab
                              pronunciation_audios)
                             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
 
-pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Transaction<'_>) -> Result<usize, WaniError>
+pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Transaction<'_>) -> Result<usize, WaniSqlError>
 {
     let p = rusqlite::params!(
         format!("{}", v.id),
@@ -641,7 +706,7 @@ pub(crate) fn store_kana_vocab(v: wanidata::KanaVocab, stmt: &mut Transaction<'_
 
     match stmt.execute(INSERT_KANA_VOCAB, p) {
         Ok(u) => Ok(u),
-        Err(e) => Err(WaniError::Sql(e)),
+        Err(e) => Err(WaniSqlError::Sql(e)),
     }
 }
 
@@ -665,7 +730,7 @@ pub(crate) fn select_kana_vocab_by_id(n: usize) -> String {
                          std::iter::repeat("?").take(n).collect::<Vec<_>>().join(","));
 }
 
-pub(crate) fn parse_kana_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::KanaVocab, WaniError> {
+pub(crate) fn parse_kana_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::KanaVocab, WaniSqlError> {
     return Ok(wanidata::KanaVocab {
         id: v.get::<usize, i32>(0)?,
         data: wanidata::KanaVocabData { 
@@ -691,4 +756,28 @@ pub(crate) fn parse_kana_vocab(v: &rusqlite::Row<'_>) -> Result<wanidata::KanaVo
             pronunciation_audios: serde_json::from_str::<Vec<PronunciationAudio>>(&v.get::<usize, String>(14)?)?, 
         }
     });
+}
+
+pub(crate) async fn get_all_cache_infos(conn: &AsyncConnection, ignore_cache: bool) -> Result<HashMap<usize, CacheInfo>, WaniSqlError> {
+    if ignore_cache {
+        return Ok(HashMap::new());
+    }
+
+    Ok(conn.call(|conn| {
+        let mut stmt = conn.prepare("select i.id, i.last_modified, i.updated_after, i.etag from cache_info i;")?;
+        let infos = stmt.query_map([],
+                                   |r| Ok(CacheInfo {
+                                       id: r.get::<usize, usize>(0)?,
+                                       last_modified: r.get::<usize, Option<String>>(1)?, 
+                                       updated_after: r.get::<usize, Option<String>>(2)?,
+                                       etag: r.get::<usize, Option<String>>(3)? }))?;
+
+        let mut map = HashMap::new();
+        for info in infos {
+            if let Ok(i) = info {
+                map.insert(i.id, i);
+            }
+        }
+        return Ok(map);
+    }).await?)
 }
