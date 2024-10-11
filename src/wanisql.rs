@@ -262,9 +262,6 @@ pub(crate) fn parse_assignment(r: &rusqlite::Row<'_>) -> Result<wanidata::Assign
                 },
             subject_id: r.get::<usize, i32>(6)?,
             subject_type: wanidata::SubjectType::from(r.get::<usize, usize>(7)?),
-            burned_at: None,
-            passed_at: None,
-            resurrected_at: None,
             unlocked_at: None,
         }
     });

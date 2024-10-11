@@ -3346,14 +3346,10 @@ async fn parse_response(response: Result<Response, reqwest::Error>) -> Result<(W
                     let headers = r.headers().to_owned();
                     let ratelimit = wanidata::RateLimit::from(&headers);
                     Ok((WaniResp {
-                        url: r.url().to_string(),
-                        data_updated_at: None,
                         data: WaniData::Collection(wanidata::Collection { 
                             data: vec![],
                             pages: wanidata::PageData {
-                                per_page: 0,
                                 next_url: None,
-                                previous_url: None,
                             },
                         }),
                         resources_updated: None,

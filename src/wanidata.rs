@@ -1,4 +1,5 @@
-///! Data structures (and some related procedures) to model data going to/from WaniKani servers
+/// Data structures (and some related procedures) to model data going to/from WaniKani servers
+///
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -8,13 +9,20 @@ use chrono::{
 };
 use wana_kana::{IsJapaneseChar, IsJapaneseStr};
 
+/// models a successful response from the WaniKani api
+///
+/// The structs/enums that are part of the tree rooted with WaniResp are structured the way they
+/// are to easily deserialize from the WaniKani API responses
 #[derive(Debug, Deserialize)]
 pub struct WaniResp {
-    pub url: String,
-    pub data_updated_at: Option<String>,
     #[serde(flatten)]
     pub data: WaniData,
     pub resources_updated: Option<ResourcesUpdated>,
+    /*
+     * Unused, but part of api
+    pub url: String,
+    pub data_updated_at: Option<String>,
+    */
 }
 
 #[derive(Debug, Deserialize)]
@@ -24,35 +32,27 @@ pub struct ResourcesUpdated {
 
 #[derive(Debug, Deserialize)]
 pub struct ResourcesUpdatedAssignment {
-    pub url: String,
-    pub data_updated_at: String,
     #[serde(flatten)]
     pub data: Assignment,
+    /*
+     * Unused, but part of api
+    pub url: String,
+    pub data_updated_at: String,
+    */
 }
 
 #[derive(Debug, Default)]
 pub struct RateLimit {
-    pub limit: usize,
     pub remaining: usize,
     pub reset: u64,
+    /*
+     * Unused, but part of api
+    pub limit: usize,
+    */
 }
 
 impl RateLimit {
     pub fn from(headers: &reqwest::header::HeaderMap) -> Option<RateLimit> {
-        let limit = headers.get("RateLimit-Limit");
-        if let None = limit {
-            return None;
-        }
-        let limit = limit.unwrap().to_str();
-        if let Err(_) = limit {
-            return None;
-        }
-        let limit = limit.unwrap().parse();
-        if let Err(_) = limit {
-            return None;
-        }
-        let limit = limit.unwrap();
-
         let remaining = headers.get("RateLimit-Remaining");
         if let None = remaining {
             return None;
@@ -82,7 +82,6 @@ impl RateLimit {
         let reset = reset.unwrap();
 
         return Some(RateLimit {
-            limit,
             remaining,
             reset,
         })
@@ -144,27 +143,35 @@ pub struct Assignment {
 #[derive(Deserialize, Debug, Copy, Clone)]
 pub struct AssignmentData {
     pub available_at: Option<DateTime<Utc>>,
-    pub burned_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub hidden: bool,
-    pub passed_at: Option<DateTime<Utc>>,
-    pub resurrected_at: Option<DateTime<Utc>>,
     pub srs_stage: i32,
     pub started_at: Option<DateTime<Utc>>,
     pub subject_id: i32,
     pub subject_type: SubjectType,
     pub unlocked_at: Option<DateTime<Utc>>,
+    /*
+     * Unused, but part of api
+    pub burned_at: Option<DateTime<Utc>>,
+    pub passed_at: Option<DateTime<Utc>>,
+    pub resurrected_at: Option<DateTime<Utc>>,
+    */
 }
 
 #[derive(Deserialize, Debug)]
 pub struct Review {
-    pub id: i64,
     pub data: ReviewData,
+    /* 
+     * Unused, but part of api
+    pub id: i64,
+    */
 }
 
 #[derive(Deserialize, Debug)]
 pub struct ReviewData {
     pub assignment_id: i32,
+    /*
+     * Unused, but part of the API
     pub created_at: DateTime<Utc>,
     pub ending_srs_stage: u8,
     pub incorrect_meaning_answers: u16,
@@ -172,6 +179,7 @@ pub struct ReviewData {
     pub spaced_repetition_system_id: i32,
     pub starting_srs_stage: u8,
     pub subject_id: i32
+    */
 }
 
 #[derive(Debug, Serialize)]
@@ -254,7 +262,6 @@ pub enum SubjectType {
     KanaVocab
 }
 
-
 impl std::convert::Into<usize> for SubjectType {
     fn into(self) -> usize {
         match self {
@@ -278,7 +285,6 @@ impl std::convert::From<usize> for SubjectType {
     }
 }
 
-
 #[derive(Deserialize, Debug)]
 pub struct Collection {
     pub data: Vec<WaniData>,
@@ -287,9 +293,11 @@ pub struct Collection {
 
 #[derive(Deserialize, Debug)]
 pub struct PageData {
-    pub per_page: i32,
     pub next_url: Option<String>,
+    /*
+    pub per_page: i32,
     pub previous_url: Option<String>,
+    */
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -693,6 +701,7 @@ pub enum AuxMeaningType
     Blacklist
 }
 
+/// evaluates a flashcard guess
 pub fn is_correct_answer(subject: &Subject, guess: &str, is_meaning: bool, kana_input: &str) -> AnswerResult {
     let is_meaning = is_meaning || match subject {
         Subject::Kanji(_) => false,
@@ -875,6 +884,7 @@ fn edit_distance(s: &str, t: &str) -> usize {
     prev[m]
 }
 
+/// options to format display strings from wanikani servers
 #[derive(Default)]
 pub struct WaniFmtArgs {
     pub radical_args: WaniTagArgs,
@@ -885,12 +895,14 @@ pub struct WaniFmtArgs {
     pub ja_args: WaniTagArgs,
 }
 
+/// specifies an open and close tag to replace custom wanikani tags with
 #[derive(Default)]
 pub struct WaniTagArgs {
     pub open_tag: String,
     pub close_tag: String,
 }
 
+/// replaces custom tags sent in display strings from wanikani servers
 pub fn format_wani_text(s: &str, args: &WaniFmtArgs) -> String {
     let s = s.replace("<radical>", &args.radical_args.open_tag);
     let s = s.replace("</radical>", &args.radical_args.close_tag);
