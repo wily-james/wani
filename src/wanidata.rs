@@ -1,5 +1,4 @@
-/// Data structures (and some related procedures) to model data going to/from WaniKani servers
-///
+/// Data structures (and some related procedures) to model data going to/from WaniKani api
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -41,6 +40,7 @@ pub struct ResourcesUpdatedAssignment {
     */
 }
 
+/// rate-limiting info returned by api
 #[derive(Debug, Default)]
 pub struct RateLimit {
     pub remaining: usize,
@@ -52,6 +52,7 @@ pub struct RateLimit {
 }
 
 impl RateLimit {
+    /// parses RateLimit from api response headers
     pub fn from(headers: &reqwest::header::HeaderMap) -> Option<RateLimit> {
         let remaining = headers.get("RateLimit-Remaining");
         if let None = remaining {
@@ -88,6 +89,7 @@ impl RateLimit {
     }
 }
 
+/// all the possible data types returned by successful api responses
 #[derive(Deserialize, Debug)]
 #[serde(tag="object")]
 pub enum WaniData

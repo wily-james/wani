@@ -27,6 +27,7 @@ impl Display for WaniSqlError {
     }
 }
 
+/// info for caching different WaniKani data types
 #[derive(Default)]
 pub(crate) struct CacheInfo {
     pub id: usize, // See CACHE_TYPE_* constants

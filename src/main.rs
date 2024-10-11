@@ -54,7 +54,7 @@ struct Args {
     command: Option<Command>,
 
     /// Specifies the Wanikani API personal access token to use.
-    /// See: https://www.wanikani.com/settings/personal_access_tokens
+    /// See: <https://www.wanikani.com/settings/personal_access_tokens>
     #[arg(short, long, value_name = "TOKEN")]
     auth: Option<String>,
 
