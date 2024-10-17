@@ -980,7 +980,7 @@ async fn do_reviews_inner<'a>(subjects: &HashMap<i32, Subject>, web_config: &Wan
     let rng = &mut thread_rng();
     let align = console::Alignment::Center;
     let correct_msg = if p_config.colorblind { Some("Correct") } else { None };
-    let incorrect_msg = if p_config.colorblind { Some("Inorrect") } else { None };
+    let incorrect_msg = if p_config.colorblind { Some("Incorrect") } else { None };
     let wfmt_args = get_wfmt_args(&term);
     let mut input = String::new();
     'subject: loop {
